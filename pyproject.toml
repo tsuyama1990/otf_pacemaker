@@ -1,7 +1,32 @@
 [project]
-name = "otf-pacemaker"
+name = "ace-active-carver"
 version = "0.1.0"
-description = "Add your description here"
+description = "Uncertainty-driven on-the-fly active learning system using Pacemaker (ACE potentials) and LAMMPS."
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "pacemaker",
+    "ase",
+    "numpy",
+    "pandas",
+    "scipy",
+    "lammps",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "black",
+    "isort",
+    "pydocstyle",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
