@@ -1,60 +1,103 @@
-"""Tests for Active Learning module."""
-
-import pytest
+import unittest
+from unittest.mock import MagicMock, patch
 import numpy as np
-import pandas as pd
 from ase import Atoms
-from src.active_learning import ClusterCarver, convert_to_pacemaker_format
+from src.active_learning import SmallCellGenerator, MaxGammaSampler
 
-def test_cluster_carver_init():
-    carver = ClusterCarver(r_core=2.0, r_buffer=3.0)
-    assert carver.r_core == 2.0
-    assert carver.r_buffer == 3.0
+class TestSmallCellGenerator(unittest.TestCase):
+    def setUp(self):
+        self.box_size = 10.0
+        self.r_core = 3.0
+        self.generator = SmallCellGenerator(
+            box_size=self.box_size,
+            r_core=self.r_core,
+            stoichiometry_tolerance=0.1,
+            elements=['Fe']
+        )
 
-def test_cluster_carver_extract():
-    # Create a simple cubic lattice
-    # 3x3x3 = 27 atoms. Distance between neighbors is 1.0.
-    atoms = Atoms('Ar27',
-                  positions=[(x, y, z) for x in range(3) for y in range(3) for z in range(3)],
-                  cell=[3, 3, 3],
-                  pbc=True)
+        # Create a dummy atoms object
+        # 10x10x10 cubic cell, 2 atoms
+        self.atoms = Atoms('Fe2',
+                           positions=[[0, 0, 0], [2, 0, 0]],
+                           cell=[10, 10, 10],
+                           pbc=True)
 
-    # Center at (1, 1, 1) -> index 13
-    center_id = 13
+    @patch('src.active_learning.LAMMPS')
+    @patch('src.active_learning.ExpCellFilter')
+    @patch('src.active_learning.FIRE')
+    def test_generate_structure(self, mock_fire, mock_filter, mock_lammps):
+        # Setup mocks
+        mock_calc = MagicMock()
+        mock_lammps.return_value = mock_calc
 
-    # r_core = 0.5 (only center)
-    # r_buffer = 1.1 (center + 6 nearest neighbors)
-    carver = ClusterCarver(r_core=0.5, r_buffer=1.1)
-    cluster = carver.extract_cluster(atoms, center_id)
+        # Mock FIRE run to do nothing
+        mock_opt = MagicMock()
+        mock_fire.return_value = mock_opt
 
-    # Verify cluster size
-    # 1 center + 6 neighbors = 7 atoms
-    assert len(cluster) == 7
+        # Run generate with atom 0 as center
+        center_id = 0
+        small_cell = self.generator.generate(self.atoms, center_id, "dummy.yace")
 
-    # Verify weights
-    weights = cluster.arrays['forces_weight']
-    assert np.sum(weights == 1.0) == 1
-    assert np.sum(weights == 0.0) == 6
+        # Assertions on the generated cell
+        self.assertTrue(small_cell.pbc.all())
+        np.testing.assert_array_almost_equal(small_cell.cell.lengths(), [self.box_size]*3)
 
-    # Verify the center atom has weight 1.0
-    # Since we don't know the exact order (though extract_cluster implementation uses indices order),
-    # we check if the atom at distance 0 from center (in the cluster frame) has weight 1.0.
-    # But cluster positions are absolute. We know center was at (1,1,1).
-    # Let's check distances from (1,1,1).
-    dists = np.linalg.norm(cluster.positions - np.array([1,1,1]), axis=1)
+        positions = small_cell.get_positions()
+        self.assertEqual(len(small_cell), 2)
 
-    # Find index where dist is ~0
-    center_idx = np.argmin(dists)
-    assert weights[center_idx] == 1.0
+        # Find atom corresponding to original center (closest to 5,5,5)
+        center_pos = np.array([5.0, 5.0, 5.0])
+        dists = np.linalg.norm(positions - center_pos, axis=1)
+        self.assertLess(np.min(dists), 0.01) # One atom should be at center
 
-def test_convert_to_pacemaker_format():
-    atoms1 = Atoms('H2', positions=[[0, 0, 0], [0, 0, 0.74]])
-    atoms2 = Atoms('O2', positions=[[0, 0, 0], [0, 0, 1.2]])
+    @patch('src.active_learning.LAMMPS')
+    @patch('src.active_learning.ExpCellFilter')
+    @patch('src.active_learning.FIRE')
+    def test_relaxation_called(self, mock_fire, mock_filter, mock_lammps):
+        mock_calc = MagicMock()
+        mock_lammps.return_value = mock_calc
+        mock_opt = MagicMock()
+        mock_fire.return_value = mock_opt
 
-    df = convert_to_pacemaker_format([atoms1, atoms2])
+        self.generator.generate(self.atoms, 0, "dummy.yace")
 
-    assert isinstance(df, pd.DataFrame)
-    assert 'ase_atoms' in df.columns
-    assert len(df) == 2
-    assert df.iloc[0]['ase_atoms'] == atoms1
-    assert df.iloc[1]['ase_atoms'] == atoms2
+        mock_lammps.assert_called()
+        args, kwargs = mock_lammps.call_args
+        self.assertIn('pair_style', kwargs['parameters'])
+        self.assertEqual(kwargs['parameters']['pair_style'], 'pace')
+
+        mock_filter.assert_called()
+        mock_fire.assert_called()
+        mock_opt.run.assert_called()
+
+
+class TestMaxGammaSampler(unittest.TestCase):
+    def test_sample(self):
+        sampler = MaxGammaSampler()
+        atoms = Atoms('H5')
+        # Setup arrays
+        # 5 atoms. Gamma values: [0.1, 0.5, 0.2, 0.9, 0.0]
+        # Max is index 3 (0.9), then index 1 (0.5)
+        atoms.set_array('f_f_gamma', np.array([0.1, 0.5, 0.2, 0.9, 0.0]))
+
+        # Test n_clusters = 1
+        indices = sampler.sample(atoms, 1)
+        self.assertEqual(indices, [3])
+
+        # Test n_clusters = 2
+        indices = sampler.sample(atoms, 2)
+        # Should be sorted max first
+        self.assertEqual(indices, [3, 1])
+
+    def test_sample_fallback_random(self):
+        sampler = MaxGammaSampler()
+        atoms = Atoms('H10')
+        # No gamma array
+
+        with self.assertLogs('src.active_learning', level='WARNING') as cm:
+            indices = sampler.sample(atoms, 2)
+            self.assertEqual(len(indices), 2)
+            self.assertTrue(any("Gamma values not found" in o for o in cm.output))
+
+if __name__ == '__main__':
+    unittest.main()

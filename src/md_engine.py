@@ -5,23 +5,18 @@ including the generation of input files and management of simulation states.
 """
 
 import subprocess
-from enum import Enum
 from pathlib import Path
+from typing import List, Dict, Optional
+
+from src.interfaces import MDEngine
+from src.enums import SimulationState
 
 
-class SimulationState(Enum):
-    """Enum representing the state of a simulation after execution."""
-
-    COMPLETED = "completed"
-    UNCERTAIN = "uncertain"
-    FAILED = "failed"
-
-
-class LAMMPSRunner:
+class LAMMPSRunner(MDEngine):
     """Handles execution of LAMMPS simulations.
 
     Attributes:
-        cmd: The command to run LAMMPS (e.g., 'lmp_serial' or 'mpirun -np 4 lmp_mpi').
+        cmd: The command to run LAMMPS.
         lj_params: Dictionary containing Lennard-Jones parameters.
         md_params: Dictionary containing MD parameters.
     """
@@ -31,14 +26,14 @@ class LAMMPSRunner:
 
         Args:
             cmd: The command string to execute LAMMPS.
-            lj_params: A dictionary containing LJ parameters (epsilon, sigma, cutoff).
-            md_params: A dictionary containing MD parameters (elements, timestep, temp, press, etc.).
+            lj_params: LJ parameters (epsilon, sigma, cutoff).
+            md_params: MD parameters (elements, timestep, temp, press, etc.).
         """
         self.cmd = cmd
         self.lj_params = lj_params
         self.md_params = md_params
 
-    def run_md(
+    def run(
         self,
         potential_path: str,
         steps: int,
@@ -48,23 +43,39 @@ class LAMMPSRunner:
     ) -> SimulationState:
         """Run an MD simulation using the specified potential and parameters.
 
-        This method generates the necessary LAMMPS input files, including the
-        `pair_style hybrid/overlay` configuration for using both LJ and ACE potentials.
-
         Args:
-            potential_path: Path to the ACE potential file (.yace or similar).
+            potential_path: Path to the ACE potential file.
             steps: Number of MD steps to run.
             gamma_threshold: Uncertainty threshold to stop the simulation.
-            input_structure: Path to structure file (data file or restart file).
+            input_structure: Path to structure file.
             is_restart: Whether the input_structure is a restart file.
 
         Returns:
-            SimulationState: The final state of the simulation (COMPLETED, UNCERTAIN, or FAILED).
+            SimulationState: The final state of the simulation.
         """
         input_file_path = "in.lammps"
-        log_file_path = "log.lammps"
-        dump_file_path = "dump.lammpstrj"
-        restart_file_path = "restart.chk"
+
+        self._write_input_file(
+            input_file_path,
+            potential_path,
+            steps,
+            gamma_threshold,
+            input_structure,
+            is_restart
+        )
+
+        return self._execute_lammps(input_file_path)
+
+    def _write_input_file(
+        self,
+        filepath: str,
+        potential_path: str,
+        steps: int,
+        gamma_threshold: float,
+        input_structure: str,
+        is_restart: bool,
+    ) -> None:
+        """Generates the LAMMPS input script."""
 
         # Extract parameters
         epsilon = self.lj_params.get("epsilon", 1.0)
@@ -81,12 +92,12 @@ class LAMMPSRunner:
         dump_freq = self.md_params.get("dump_freq", 1000)
         masses = self.md_params.get("masses", {})
 
-        # Build LAMMPS input script
-        lines = []
-        lines.append("# ACE Active Carver MD Simulation")
-        lines.append("units metal")
-        lines.append("atom_style atomic")
-        lines.append("boundary p p p")
+        lines = [
+            "# ACE Active Carver MD Simulation",
+            "units metal",
+            "atom_style atomic",
+            "boundary p p p",
+        ]
 
         if is_restart:
             lines.append(f"read_restart {input_structure}")
@@ -95,75 +106,66 @@ class LAMMPSRunner:
 
         # Dynamic mass setting
         for i, el in enumerate(elements):
-            if el in masses:
-                lines.append(f"mass {i+1} {masses[el]}")
-            else:
-                lines.append(f"mass {i+1} 1.0")
+            mass = masses.get(el, 1.0)
+            lines.append(f"mass {i+1} {mass}")
 
-        # Pair style definition
+        # Pair style
         lines.append(f"pair_style hybrid/overlay pace/extrapolation lj/cut {rcut}")
         lines.append(f"pair_coeff * * pace/extrapolation {potential_path} {element_map}")
         lines.append(f"pair_coeff * * lj/cut {epsilon} {sigma}")
 
-        lines.append(f"neighbor 1.0 bin")
-        lines.append(f"neigh_modify delay 0 every 1 check yes")
-
+        lines.append("neighbor 1.0 bin")
+        lines.append("neigh_modify delay 0 every 1 check yes")
         lines.append(f"timestep {timestep}")
-
         lines.append("thermo 10")
         lines.append("thermo_style custom step temp press pe ke etotal")
 
-        # Fixes
-        # Use npt for MD
+        # NPT fix
         lines.append(f"fix 1 all npt temp {temp} {temp} 0.1 iso {press} {press} 1.0")
 
-        # Uncertainty monitoring (fix halt)
-        # We calculate gamma using pace/extrapolation
+        # Uncertainty monitoring
         lines.append("# Gamma calculation fix")
         lines.append("fix f_gamma all pair 10 pace/extrapolation gamma 1")
         lines.append("compute c_max_gamma all reduce max f_f_gamma")
         lines.append("variable v_max_gamma equal c_max_gamma")
         lines.append(f"fix halt_sim all halt 10 v_max_gamma > {gamma_threshold} error continue")
 
-        # Restart
-        lines.append(f"restart {restart_freq} {restart_file_path}")
-
-        # Dump for extraction
-        # We dump periodically or at least the last frame.
-        # CRITICAL: We must include 'f_f_gamma' in the dump output to allow identifying
-        # uncertain atoms in the active learning step.
-        lines.append(f"dump 1 all custom {dump_freq} {dump_file_path} id type x y z fx fy fz f_f_gamma")
+        # Restart and Dump
+        lines.append(f"restart {restart_freq} restart.chk")
+        lines.append(f"dump 1 all custom {dump_freq} dump.lammpstrj id type x y z fx fy fz f_f_gamma")
 
         lines.append(f"run {steps}")
 
-        # Write input file
-        with open(input_file_path, "w") as f:
+        with open(filepath, "w") as f:
             f.write("\n".join(lines))
 
-        # Run LAMMPS
+    def _execute_lammps(self, input_file_path: str) -> SimulationState:
+        """Executes the LAMMPS command and checks the result."""
         cmd_list = self.cmd.split() + ["-in", input_file_path]
 
         try:
-            # Redirect output to a log file to parse later if needed,
-            # but LAMMPS also generates its own log.lammps.
-            # We'll capture stdout/stderr to avoid cluttering the console.
             with open("stdout.log", "w") as out, open("stderr.log", "w") as err:
                 result = subprocess.run(cmd_list, stdout=out, stderr=err)
-
-            if result.returncode != 0:
-                # Check if it failed due to halt or actual error.
-                pass
         except Exception as e:
             print(f"LAMMPS execution failed: {e}")
             return SimulationState.FAILED
 
-        # Check log for halt
-        with open(log_file_path, "r") as f:
+        # Check log for halt condition
+        log_path = "log.lammps"
+        if not Path(log_path).exists():
+             # If log wasn't created, maybe it failed early or stdout was used?
+             # Standard LAMMPS creates log.lammps unless -log none is passed.
+             # If result.returncode is not 0, it failed.
+             if result.returncode != 0:
+                 return SimulationState.FAILED
+             return SimulationState.COMPLETED
+
+        with open(log_path, "r") as f:
             log_content = f.read()
 
         if "Fix halt" in log_content:
             return SimulationState.UNCERTAIN
-        elif "ERROR" in log_content: # Crude check
+        elif "ERROR" in log_content or result.returncode != 0:
              return SimulationState.FAILED
         else:
             return SimulationState.COMPLETED
