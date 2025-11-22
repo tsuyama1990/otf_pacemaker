@@ -299,7 +299,7 @@ def main():
                 # Update current potential for next iteration
                 # We need to make sure next iteration uses this new file.
                 # Since we switch directories, we should probably use absolute path again.
-                current_potential = str((work_dir / new_potential).resolve())
+                current_potential = str(Path(new_potential).resolve())
 
                 # Set restart flag for next loop
                 is_restart = True
