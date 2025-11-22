@@ -106,13 +106,15 @@ class LAMMPSRunner(MDEngine):
 
         # Dynamic mass setting
         for i, el in enumerate(elements):
-            mass = masses.get(el, 1.0)
+            # Raise KeyError if mass is missing to prevent physical errors
+            mass = masses[el]
             lines.append(f"mass {i+1} {mass}")
 
         # Pair style
         lines.append(f"pair_style hybrid/overlay pace/extrapolation lj/cut {rcut}")
         lines.append(f"pair_coeff * * pace/extrapolation {potential_path} {element_map}")
         lines.append(f"pair_coeff * * lj/cut {epsilon} {sigma}")
+        lines.append("pair_modify shift yes")
 
         lines.append("neighbor 1.0 bin")
         lines.append("neigh_modify delay 0 every 1 check yes")

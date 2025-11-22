@@ -26,13 +26,13 @@ class DeltaLabeler(Labeler):
         self.lj_params = lj_params
 
     def label(self, structure: Atoms) -> Atoms:
-        """Compute delta energy and forces for a given structure.
+        """Compute delta energy, forces, and stress for a given structure.
 
         Args:
             structure: The atomic cluster to label.
 
         Returns:
-            Atoms: The cluster with updated energy and forces representing the delta.
+            Atoms: The cluster with updated energy, forces, and stress representing the delta.
         """
         # Work on copies
         cluster_dft = structure.copy()
@@ -42,8 +42,19 @@ class DeltaLabeler(Labeler):
         cluster_dft.calc = self.qe_calculator
         e_dft = cluster_dft.get_potential_energy()
         f_dft = cluster_dft.get_forces()
+        # We assume the calculator supports stress since we need to label it.
+        # If it doesn't, this will raise an error, which is appropriate given requirements.
+        try:
+             s_dft = cluster_dft.get_stress()
+        except Exception:
+             # Some calculators might not support stress or require specific params.
+             # We assume the user provided a capable calculator.
+             # Attempting to proceed without stress would violate the "validity" requirement.
+             # Re-raise is appropriate.
+             raise
 
         # 2. LJ Calculation
+        # ASE LennardJones automatically shifts the potential if 'rc' is provided.
         lj_kwargs = {
             'epsilon': self.lj_params.get('epsilon', 1.0),
             'sigma': self.lj_params.get('sigma', 1.0),
@@ -52,6 +63,7 @@ class DeltaLabeler(Labeler):
         cluster_lj.calc = LennardJones(**lj_kwargs)
         e_lj = cluster_lj.get_potential_energy()
         f_lj = cluster_lj.get_forces()
+        s_lj = cluster_lj.get_stress()
 
         # 3. Compute Delta
         result_cluster = cluster_dft.copy()
@@ -59,15 +71,20 @@ class DeltaLabeler(Labeler):
 
         e_delta = e_dft - e_lj
         f_delta = f_dft - f_lj
+        s_delta = s_dft - s_lj
 
         # 4. Store Results
         result_cluster.info['energy'] = e_delta
         result_cluster.arrays['forces'] = f_delta
+        result_cluster.info['stress'] = s_delta
 
         # Store Raw DFT
         result_cluster.info['energy_dft_raw'] = e_dft
         result_cluster.arrays['forces_dft_raw'] = f_dft
+        # result_cluster.info['stress_dft_raw'] = s_dft # Optional
 
+        # Weights
         result_cluster.info['energy_weight'] = 1.0
+        result_cluster.info['virial_weight'] = 1.0
 
         return result_cluster
