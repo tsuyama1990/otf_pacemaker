@@ -78,6 +78,8 @@ class LAMMPSRunner:
         temp = self.md_params.get("temperature", 300.0)
         press = self.md_params.get("pressure", 1.0)
         restart_freq = self.md_params.get("restart_freq", 1000)
+        dump_freq = self.md_params.get("dump_freq", 1000)
+        masses = self.md_params.get("masses", {})
 
         # Build LAMMPS input script
         lines = []
@@ -91,7 +93,12 @@ class LAMMPSRunner:
         else:
             lines.append(f"read_data {input_structure}")
 
-        lines.append(f"mass * 1.0") # Simplified mass setting, usually read from data file or set per type
+        # Dynamic mass setting
+        for i, el in enumerate(elements):
+            if el in masses:
+                lines.append(f"mass {i+1} {masses[el]}")
+            else:
+                lines.append(f"mass {i+1} 1.0")
 
         # Pair style definition
         lines.append(f"pair_style hybrid/overlay pace/extrapolation lj/cut {rcut}")
@@ -125,7 +132,7 @@ class LAMMPSRunner:
         # We dump periodically or at least the last frame.
         # CRITICAL: We must include 'f_f_gamma' in the dump output to allow identifying
         # uncertain atoms in the active learning step.
-        lines.append(f"dump 1 all custom 10 {dump_file_path} id type x y z fx fy fz f_f_gamma")
+        lines.append(f"dump 1 all custom {dump_freq} {dump_file_path} id type x y z fx fy fz f_f_gamma")
 
         lines.append(f"run {steps}")
 
