@@ -5,20 +5,15 @@ This module sets up the configuration and dependencies, then orchestrates the ac
 
 import logging
 import sys
-import os
-import shutil
-import numpy as np
-from typing import Optional
 from pathlib import Path
-from ase.io import read
 from ase.calculators.espresso import Espresso
 
 from src.active_learning import MaxGammaSampler, SmallCellGenerator
 from src.config import Config
-from src.enums import SimulationState
-from src.labeler import DeltaLabeler
-from src.md_engine import LAMMPSRunner
+from src.labeler import DeltaLabeler, ShiftedLennardJones
+from src.md_engine import LAMMPSRunner, LAMMPSInputGenerator
 from src.trainer import PacemakerTrainer
+from src.orchestrator import ActiveLearningOrchestrator
 
 # Setup logging
 logging.basicConfig(
@@ -42,8 +37,7 @@ def main():
     # 2. Initialize Components
 
     # MD Engine
-    runner = LAMMPSRunner(
-        cmd="lmp_serial",  # In production, this might come from env or config
+    input_generator = LAMMPSInputGenerator(
         lj_params={
             "epsilon": config.lj_params.epsilon,
             "sigma": config.lj_params.sigma,
@@ -60,16 +54,15 @@ def main():
         }
     )
 
+    runner = LAMMPSRunner(
+        cmd="lmp_serial",  # In production, this might come from env or config
+        input_generator=input_generator
+    )
+
     # Sampler
     sampler = MaxGammaSampler()
 
     # Generator
-    # Note: config.al_params.stoichiometry_tolerance is used in the original code,
-    # but here we use it to fulfill the "stoichiometric_ratio" argument or strict checking if needed.
-    # Assuming config.al_params has access to expected stoichiometry or we pass a dummy/derived dict.
-    # For now, we pass a derived dict from elements assuming equal ratio or just empty if not strictly enforced.
-    # A better approach is to rely on the initial structure, but SmallCellGenerator wants it in init.
-    # We'll assume equal weights for now or pass empty dict if check isn't critical inside generator.
     stoich_ratio = {el: 1.0 for el in config.md_params.elements}
 
     generator = SmallCellGenerator(
@@ -82,7 +75,7 @@ def main():
     )
 
     # Labeler
-    # Setup QE Calculator
+    # Setup QE Calculator (Reference)
     qe_input_data = {
         "control": {
             "pseudo_dir": config.dft_params.pseudo_dir,
@@ -103,172 +96,34 @@ def main():
         pseudo_dir=config.dft_params.pseudo_dir
     )
 
+    # Setup LJ Calculator (Baseline)
+    lj_kwargs = {
+        'epsilon': config.lj_params.epsilon,
+        'sigma': config.lj_params.sigma,
+        'rc': config.lj_params.cutoff
+    }
+    lj_calculator = ShiftedLennardJones(**lj_kwargs)
+
     labeler = DeltaLabeler(
-        qe_calculator=qe_calculator,
-        lj_params={
-            "epsilon": config.lj_params.epsilon,
-            "sigma": config.lj_params.sigma,
-            "cutoff": config.lj_params.cutoff
-        }
+        reference_calculator=qe_calculator,
+        baseline_calculator=lj_calculator
     )
 
     # Trainer
     trainer = PacemakerTrainer()
 
-    # 3. Active Learning Loop
-    run_active_learning_loop(config, runner, sampler, generator, labeler, trainer)
+    # 3. Initialize Orchestrator
+    orchestrator = ActiveLearningOrchestrator(
+        config=config,
+        md_engine=runner,
+        sampler=sampler,
+        generator=generator,
+        labeler=labeler,
+        trainer=trainer
+    )
 
-
-def run_active_learning_loop(config, md_engine, sampler, generator, labeler, trainer):
-    """Executes the active learning loop explicitly."""
-    current_potential = config.al_params.initial_potential
-    current_structure = config.md_params.initial_structure
-    is_restart = False
-    iteration = 0
-    original_cwd = Path.cwd()
-
-    while True:
-        iteration += 1
-        work_dir = Path(f"data/iteration_{iteration}")
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info(f"--- Starting Iteration {iteration} ---")
-
-        try:
-            os.chdir(work_dir)
-
-            # Resolve paths relative to original CWD
-            abs_potential_path = _resolve_path(current_potential, original_cwd)
-
-            if not abs_potential_path.exists():
-                logger.error(f"Potential file not found: {abs_potential_path}")
-                break
-
-            # Prepare Structure Path
-            input_structure_arg = _prepare_structure_path(
-                is_restart, iteration, current_structure, original_cwd
-            )
-            if not input_structure_arg:
-                break
-
-            # 1. Run MD
-            logger.info("Running MD...")
-            state = md_engine.run(
-                potential_path=str(abs_potential_path),
-                steps=config.md_params.n_steps,
-                gamma_threshold=config.al_params.gamma_threshold,
-                input_structure=input_structure_arg,
-                is_restart=is_restart
-            )
-
-            logger.info(f"MD Finished with state: {state}")
-
-            if state == SimulationState.COMPLETED:
-                logger.info("Simulation completed successfully.")
-                break
-            elif state == SimulationState.FAILED:
-                logger.error("Simulation failed.")
-                break
-            elif state == SimulationState.UNCERTAIN:
-                # 2. Handle Uncertainty
-                logger.info("Uncertainty detected. Starting Active Learning cycle.")
-
-                dump_file = Path("dump.lammpstrj")
-                if not dump_file.exists():
-                    raise FileNotFoundError("Dump file not found.")
-
-                # Read last frame
-                # ase read handles lammpstrj
-                atoms = read(dump_file, index=-1, format="lammps-dump-text")
-
-                # Ensure species mapping
-                if config.md_params.elements:
-                     # We might need to map types to symbols if dump doesn't have them
-                     # Check if 'type' is present and symbols are 'X'
-                     if 'type' in atoms.arrays:
-                         types = atoms.get_array('type')
-                         elements = config.md_params.elements
-                         symbols = []
-                         for t in types:
-                             # type is 1-based
-                             if 1 <= t <= len(elements):
-                                 symbols.append(elements[t-1])
-                             else:
-                                 symbols.append("X")
-                         atoms.set_chemical_symbols(symbols)
-
-                # Sample
-                center_ids = sampler.sample(atoms, config.al_params.n_clusters)
-
-                labeled_clusters = []
-                logger.info(f"Generating and labeling {len(center_ids)} small cells...")
-
-                for cid in center_ids:
-                    try:
-                        # Generate Small Cell
-                        cell = generator.generate_cell(atoms, cid, str(abs_potential_path))
-
-                        # Label
-                        labeled_cluster = labeler.label(cell)
-                        if labeled_cluster is None:
-                            logger.warning(f"Labeling failed for cluster {cid}. Skipping.")
-                            continue
-
-                        labeled_clusters.append(labeled_cluster)
-                    except Exception as e:
-                        logger.warning(f"Processing failed for cluster {cid}: {e}. Skipping.")
-                        continue
-
-                if not labeled_clusters:
-                    logger.error("No clusters labeled successfully. Aborting active learning loop.")
-                    break
-
-                # Train
-                logger.info("Training new potential...")
-                dataset_path = trainer.prepare_dataset(labeled_clusters)
-                new_potential = trainer.train(dataset_path, str(abs_potential_path))
-
-                current_potential = str(Path(new_potential).resolve())
-                is_restart = True
-                logger.info(f"New potential trained: {current_potential}")
-
-        except Exception as e:
-            logger.exception(f"An error occurred in iteration {iteration}: {e}")
-            break
-        finally:
-            os.chdir(original_cwd)
-
-
-def _resolve_path(path_str: str, base_cwd: Path) -> Path:
-    """Resolve a path to absolute, handling relative paths correctly."""
-    p = Path(path_str)
-    if p.is_absolute():
-        return p
-    return (base_cwd / p).resolve()
-
-
-def _prepare_structure_path(
-    is_restart: bool, iteration: int, initial_structure: str, base_cwd: Path
-) -> Optional[str]:
-    """Determine the correct input structure path."""
-    if is_restart:
-        # Resume from the restart file of the PREVIOUS iteration (where it halted)
-        # Actually, if we are in iteration N, we just ran MD in iteration N.
-        # It halted. We trained. Now we want to resume.
-        # The loop starts iteration N+1.
-        # We want to read the restart file from iteration N.
-        prev_dir = base_cwd / f"data/iteration_{iteration-1}"
-        restart_file = prev_dir / "restart.chk"
-        if not restart_file.exists():
-            # Fallback or error?
-            # If restart file is missing but we have dump, we could theoretically use dump,
-            # but LAMMPS restart is binary and preserves velocity.
-            # If missing, we might need to fail.
-            logger.error(f"Restart file missing for resume: {restart_file}")
-            return None
-        return str(restart_file)
-    else:
-        return str(_resolve_path(initial_structure, base_cwd))
+    # 4. Run
+    orchestrator.run()
 
 
 if __name__ == "__main__":
