@@ -45,6 +45,7 @@ class ALParams:
         box_size: Size of the cubic small cell (Angstroms).
         initial_potential: Path to the initial potential file.
         stoichiometry_tolerance: Tolerance for stoichiometry check (default 0.1).
+        min_bond_distance: Minimum bond distance for overlap removal (default 1.5).
     """
 
     gamma_threshold: float
@@ -53,6 +54,7 @@ class ALParams:
     box_size: float
     initial_potential: str
     stoichiometry_tolerance: float = 0.1
+    min_bond_distance: float = 1.5
 
 
 @dataclass

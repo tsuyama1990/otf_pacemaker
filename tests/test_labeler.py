@@ -52,9 +52,9 @@ def test_delta_labeling_with_lj():
     lj_params = {'epsilon': 1.0, 'sigma': 1.0, 'cutoff': 2.5}
 
     # Calculate expected LJ manually
-    from ase.calculators.lj import LennardJones
+    from src.labeler import ShiftedLennardJones
     atoms_ref = atoms.copy()
-    atoms_ref.calc = LennardJones(epsilon=1.0, sigma=1.0, rc=2.5)
+    atoms_ref.calc = ShiftedLennardJones(epsilon=1.0, sigma=1.0, rc=2.5)
     e_lj_expected = atoms_ref.get_potential_energy()
     f_lj_expected = atoms_ref.get_forces()
     s_lj_expected = atoms_ref.get_stress()

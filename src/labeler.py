@@ -5,6 +5,7 @@ forces and energies to create training labels.
 """
 
 import logging
+import numpy as np
 from typing import Dict, Optional
 from ase import Atoms
 from ase.calculators.calculator import Calculator
@@ -13,6 +14,46 @@ from ase.calculators.lj import LennardJones
 from src.interfaces import Labeler
 
 logger = logging.getLogger(__name__)
+
+
+class ShiftedLennardJones(LennardJones):
+    """LennardJones calculator with potential shift to ensure V(rc) = 0."""
+
+    def calculate(
+        self,
+        atoms: Optional[Atoms] = None,
+        properties=None,
+        system_changes=None
+    ):
+        """Calculate properties, applying energy shift."""
+        if properties is None:
+            properties = ['energy']
+        if system_changes is None:
+            system_changes = ['positions', 'numbers', 'cell', 'pbc', 'charges', 'magmom']
+
+        super().calculate(atoms, properties, system_changes)
+
+        if 'energy' in self.results:
+            epsilon = self.parameters.get('epsilon', 1.0)
+            sigma = self.parameters.get('sigma', 1.0)
+            rc = self.parameters.get('rc')
+
+            if rc is not None:
+                # Calculate shift value at cutoff
+                # V(rc) = 4*eps * ((sigma/rc)^12 - (sigma/rc)^6)
+                sr_cut = sigma / rc
+                v_cut = 4.0 * epsilon * (sr_cut**12 - sr_cut**6)
+
+                # Count pairs within cutoff
+                calc_atoms = atoms if atoms is not None else self.atoms
+                dists = calc_atoms.get_all_distances(mic=True)
+                np.fill_diagonal(dists, np.inf)
+
+                # Number of pairs (matrix has double counts)
+                n_pairs = np.sum(dists < rc) / 2.0
+
+                # Subtract total shift
+                self.results['energy'] -= n_pairs * v_cut
 
 
 class DeltaLabeler(Labeler):
@@ -53,13 +94,13 @@ class DeltaLabeler(Labeler):
             return None
 
         # 2. LJ Calculation
-        # ASE LennardJones automatically shifts the potential if 'rc' is provided.
+        # Use ShiftedLennardJones to match LAMMPS pair_modify shift yes
         lj_kwargs = {
             'epsilon': self.lj_params.get('epsilon', 1.0),
             'sigma': self.lj_params.get('sigma', 1.0),
             'rc': self.lj_params.get('cutoff', 2.5)
         }
-        cluster_lj.calc = LennardJones(**lj_kwargs)
+        cluster_lj.calc = ShiftedLennardJones(**lj_kwargs)
         e_lj = cluster_lj.get_potential_energy()
         f_lj = cluster_lj.get_forces()
         s_lj = cluster_lj.get_stress()
