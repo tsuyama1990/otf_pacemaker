@@ -111,6 +111,7 @@ class LAMMPSRunner:
         lines.append(f"fix 1 all npt temp {temp} {temp} 0.1 iso {press} {press} 1.0")
 
         # Uncertainty monitoring (fix halt)
+        # We calculate gamma using pace/extrapolation
         lines.append("# Gamma calculation fix")
         lines.append("fix f_gamma all pair 10 pace/extrapolation gamma 1")
         lines.append("compute c_max_gamma all reduce max f_f_gamma")
@@ -122,9 +123,8 @@ class LAMMPSRunner:
 
         # Dump for extraction
         # We dump periodically or at least the last frame.
-        # If it halts, we want the state. 'dump' commands are executed every N steps.
-        # To ensure we capture the halt state, we dump frequently enough or rely on the restart file?
-        # The plan said "Load dump file/snapshot". Let's dump every 10 steps (same as halt check) to be safe/granular.
+        # CRITICAL: We must include 'f_f_gamma' in the dump output to allow identifying
+        # uncertain atoms in the active learning step.
         lines.append(f"dump 1 all custom 10 {dump_file_path} id type x y z fx fy fz f_f_gamma")
 
         lines.append(f"run {steps}")
@@ -145,10 +145,6 @@ class LAMMPSRunner:
 
             if result.returncode != 0:
                 # Check if it failed due to halt or actual error.
-                # LAMMPS "halt" with "error continue" might return non-zero or zero depending on impl?
-                # Actually "error continue" means it prints error but might not crash the process immediately?
-                # Usually `fix halt` prints a message.
-                # Let's check the log file for "Fix halt".
                 pass
         except Exception as e:
             print(f"LAMMPS execution failed: {e}")

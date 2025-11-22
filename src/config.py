@@ -37,16 +37,18 @@ class ALParams:
     Attributes:
         gamma_threshold: Uncertainty threshold for stopping the simulation.
         n_clusters: Number of clusters to extract.
-        r_core: Radius for the core region where forces are fully weighted.
-        r_buffer: Radius for the buffer region (total cluster radius).
-        initial_potential: str
+        r_core: Radius for the core region where forces are fully weighted (and fixed during relaxation).
+        box_size: Size of the cubic small cell (Angstroms).
+        initial_potential: Path to the initial potential file.
+        stoichiometry_tolerance: Tolerance for stoichiometry check (default 0.1).
     """
 
     gamma_threshold: float
     n_clusters: int
     r_core: float
-    r_buffer: float
+    box_size: float
     initial_potential: str
+    stoichiometry_tolerance: float = 0.1
 
 
 @dataclass
