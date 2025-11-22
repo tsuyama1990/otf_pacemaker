@@ -1,133 +1,179 @@
-# ACE-Active-Carver System Architecture
+# ACE-Active-Carver Architecture Design
 
 ## 1. System Overview
-**ACE-Active-Carver** is an uncertainty-driven active learning system for Molecular Dynamics (MD). It uses the **MaxVol $\gamma$** metric from the ACE potential (Pacemaker) to detect high-uncertainty configurations during an MD simulation. When uncertainty exceeds a threshold, the system pauses, extracts a local cluster, performs a reference DFT calculation (Quantum Espresso), updates the potential (Delta-Learning), and resumes the simulation.
 
-## 2. System Architecture & State Machine
+**ACE-Active-Carver** is an automated Active Learning (AL) system designed to train Machine Learning Potentials (ACE) on-the-fly during Molecular Dynamics (MD) simulations. It employs a **Delta-Learning ($\Delta$-Learning)** strategy, where the ML potential learns the correction term between a baseline empirical potential (Lennard-Jones) and a high-fidelity reference (DFT).
 
-### State Diagram (Mermaid)
+### Core Philosophy
+1.  **Uncertainty-Driven**: The simulation is driven by the ML potential until the model detects an extrapolation event (high uncertainty, measured by MaxVol $\gamma$).
+2.  **Local Learning**: Instead of recalculating the entire system with DFT, only the local cluster causing the uncertainty is extracted and labeled.
+3.  **Delta-Learning**: The model predicts $E_{total} = E_{LJ} + E_{ACE}(\Delta)$. This ensures physical robustness (short-range repulsion) even in sparse data regimes.
+
+---
+
+## 2. System Architecture
+
+The system is composed of five loosely coupled components orchestrated by a central Controller.
+
+### 2.1 Components
+
+| Component | Role | Key Responsibility |
+| :--- | :--- | :--- |
+| **Controller** | Orchestrator | Manages the AL loop, state, and file I/O. |
+| **MD Engine** | Simulation | Runs LAMMPS with `hybrid/overlay` and handles `fix halt` logic. |
+| **Cluster Carver** | Geometry Extraction | Extracts local atomic environments and applies force masking. |
+| **Labeler** | Oracle | Calculates $\Delta$-Forces/Energies ($DFT - LJ$). |
+| **Trainer** | Model Update | Formats data and runs Pacemaker to update the ACE potential. |
+
+### 2.2 Data Flow & State Machine
+
+The system operates in a cyclic loop:
 
 ```mermaid
-stateDiagram-v2
-    [*] --> MD_RUNNING
-
-    state MD_RUNNING {
-        [*] --> LAMMPS_INTEGRATION
-        LAMMPS_INTEGRATION --> MONITOR_EXTRAPOLATION: Every N steps
-        MONITOR_EXTRAPOLATION --> LAMMPS_INTEGRATION: γ < Threshold
-        MONITOR_EXTRAPOLATION --> STOP_TRIGGER: γ >= Threshold
-    }
-
-    MD_RUNNING --> UNCERTAINTY_DETECTED: fix halt triggered
-
-    UNCERTAINTY_DETECTED --> CLUSTERING: Identify max γ atom
-
-    state CLUSTERING {
-        [*] --> SELECT_CENTER
-        SELECT_CENTER --> EXTRACT_CORE: R_core
-        EXTRACT_CORE --> ADD_BUFFER: R_buffer
-        ADD_BUFFER --> ENFORCE_LIMIT: Atoms <= 100
-    }
-
-    CLUSTERING --> DFT_CALC: Generated Cluster Structure
-
-    state DFT_CALC {
-        [*] --> CALC_LJ_BASELINE: Lennard-Jones Energy
-        CALC_LJ_BASELINE --> CALC_DFT_QE: Quantum Espresso
-        CALC_DFT_QE --> COMPUTE_DELTA: E_target = E_dft - E_lj
-    }
-
-    DFT_CALC --> RETRAINING: New (Structure, Target)
-
-    state RETRAINING {
-        [*] --> UPDATE_DATASET
-        UPDATE_DATASET --> PACEMAKER_FIT: Fine-tune ACE
-        PACEMAKER_FIT --> VALIDATE
-    }
-
-    RETRAINING --> RESUME: Updated Potential
-    RESUME --> MD_RUNNING: Restart MD
+graph TD
+    A[Start/Resume] --> B[MD Engine]
+    B -- "Gamma > Threshold" --> C[Halt & Detect]
+    C --> D[Cluster Carver]
+    D -- "Cluster + Mask" --> E[Labeler]
+    E -- "Delta Targets" --> F[Trainer]
+    F -- "New Potential" --> G[Step Back & Restart]
+    G --> B
 ```
 
-## 3. Component Responsibilities
+1.  **MD Phase**: Run LAMMPS using the current `potential.yace`.
+2.  **Interruption**: `fix halt` triggers when MaxVol $\gamma$ exceeds `threshold`.
+3.  **Carving**: Identify the atom with max $\gamma$, extract its local cluster.
+4.  **Labeling**: Compute $Target = Value_{DFT} - Value_{LJ}$ for the cluster.
+5.  **Training**: Add new data to the set, retrain `potential.yace`.
+6.  **Resume**: Reload the **last restart file** (Step Back strategy) and continue with the new potential.
 
-### A. Controller (`ActiveLearningController`)
-The central orchestrator of the system.
-*   **Responsibilities**:
-    *   Manages the main event loop and state transitions.
-    *   Instantiates and calls sub-components (MDEngine, Carver, Labeler, Trainer).
-    *   Handles configuration loading (thresholds, paths).
-    *   Logging and checkpointing the active learning cycle.
-*   **Key Methods**:
-    *   `run_loop()`: Main entry point.
-    *   `check_termination()`: Decides when to stop the AL loop (max cycles or time).
+---
 
-### B. MD Engine (`LammpsMDEngine`)
-Wrapper around the Python `lammps` module.
-*   **Responsibilities**:
-    *   Configures LAMMPS with the current ACE potential.
-    *   Sets up `pair_style pace/extrapolation`.
-    *   Configures `fix halt` to stop simulation when extrapolation grade $\gamma$ exceeds the threshold.
-    *   Provides access to the current system state (positions, forces, MaxVol grades) when halted.
-*   **Key Configuration**:
-    *   Input: `start.lmps`, `potential.yace`.
-    *   Logic: `fix 1 all halt ${check_freq} v_gamma > ${threshold} error hard` (or similar logic to exit clean).
+## 3. Component Specifications
 
-### C. Cluster Carver (`ClusterCarver`)
-The "Brain" responsible for efficient geometry extraction.
-*   **Responsibilities**:
-    *   **Center Selection**: Identifies the atom index with the maximum $\gamma$ value from the halted snapshot.
-    *   **Region Definition**:
-        *   **Core ($R_{core}$)**: Atoms within this radius of the center. These atoms will have forces trained.
-        *   **Buffer ($R_{buffer}$)**: Atoms between $R_{core}$ and $R_{buffer}$. Used to provide correct chemical environment/boundary conditions.
-    *   **Constraint Enforcement**: Ensures total atom count $\le 100$. If $N > 100$, strictly reduces $R_{buffer}$ (or $R_{core}$ if necessary) to meet the limit.
-    *   **Masking Generation**: Creates a selection mask where Core atoms = True (train forces), Buffer atoms = False (ignore forces).
-*   **Output**: An `ase.Atoms` object representing the cluster.
+### 3.1 Controller (`ActiveLearningController`)
+*   **Input**: `config.yaml` (Static configuration).
+*   **State Management**: Tracks the current iteration number and global step count.
+*   **Directory Management**: Creates `data/iteration_{N}/` for every cycle to store artifacts (clusters, logs, potentials).
+*   **Loop Logic**:
+    ```python
+    while not termination_condition:
+        exit_code = md_engine.run(iteration_dir)
+        if exit_code == "HALT":
+            cluster = carver.carve(md_engine.get_state())
+            labeled_data = labeler.label(cluster)
+            trainer.train(labeled_data)
+        else:
+            break
+    ```
 
-### D. Labeler (`DftLabeler`)
-The Oracle providing ground-truth data.
-*   **Responsibilities**:
-    *   **Delta-Learning Logic**:
-        *   Calculates $E_{LJ}$ (Lennard-Jones baseline) for the cluster using an internal calculator (e.g., ASE LJ).
-        *   Runs Quantum Espresso (QE) to get $E_{DFT}$ and $F_{DFT}$.
-        *   Computes Targets: $E_{target} = E_{DFT} - E_{LJ}$, $F_{target} = F_{DFT} - F_{LJ}$.
-    *   **Execution**: Manages QE input generation, execution (via `mpirun` or SLURM), and parsing.
-*   **Output**: Labeled structure ready for Pacemaker.
+### 3.2 MD Engine (`LammpsMDEngine`)
+*   **Potential Strategy**: **`pair_style hybrid/overlay`**
+    *   Base: `lj/cut` (Standard Lennard-Jones).
+    *   Delta: `pace/extrapolation` (ACE potential + Uncertainty monitoring).
+    *   *Note*: `pace/extrapolation` computes the ACE forces AND the extrapolation grade $\gamma$.
+*   **Input Script Generation**: Dynamically generates LAMMPS scripts.
+*   **Halt Logic**:
+    *   Uses `fix halt` to stop simulation when `v_gamma > threshold`.
+*   **Resume Strategy ("Step Back")**:
+    *   The engine periodically saves restart files (e.g., `restart.chk`).
+    *   When halting, it does **not** resume from the halted snapshot.
+    *   It resumes from the **latest `restart.chk`** (potentially 100-1000 steps prior).
+    *   *Reason*: To allow the system to re-integrate the trajectory with the newly learned forces, minimizing energy shocks.
 
-### E. Trainer (`AceTrainer`)
-Wrapper for Pacemaker tools.
-*   **Responsibilities**:
-    *   **Dataset Management**: Appends the new labeled cluster to the training set (`data.pckl.gzip` or `.xyz`).
-    *   **Fitting**: Invokes `pacemaker` command to fine-tune the potential.
-    *   **Versioning**: Saves the new `potential.yace` with a version tag/timestamp.
-*   **Strategy**: Likely uses a "fine-tuning" approach (initializing weights from previous potential) to minimize cost.
+### 3.3 Cluster Carver (`ClusterCarver`)
+*   **Input**: Halted full-system snapshot (from LAMMPS dump or internal state).
+*   **Logic**:
+    1.  Find atom $i$ with $\max(\gamma)$.
+    2.  Select all neighbors within $R_{buffer}$.
+    3.  **Constraint**: If $N_{atoms} > 100$, reduce cutoffs until $N \le 100$.
+    4.  **Region Definition**:
+        *   **Core** ($r < R_{core}$): Atoms essential for learning.
+        *   **Buffer** ($R_{core} < r < R_{buffer}$): Atoms providing chemical environment but not trained.
+*   **Force Masking**:
+    *   Assign binary weights for training:
+        *   Core Atoms: `weight = 1.0`
+        *   Buffer Atoms: `weight = 0.0`
 
-## 4. Data Flow
+### 3.4 Labeler (`DftLabeler`)
+*   **Input**: Carved cluster (`ase.Atoms`).
+*   **Process**:
+    1.  **LJ Calculation**: Calculate $E_{LJ}, F_{LJ}$ using `ase.calculators.lj` (parameters must match MD Engine exactly).
+    2.  **DFT Calculation**: Calculate $E_{DFT}, F_{DFT}$ using `ase.calculators.espresso` (Quantum Espresso).
+    3.  **Delta Calculation**:
+        *   $E_{target} = E_{DFT} - E_{LJ}$
+        *   $F_{target} = F_{DFT} - F_{LJ}$
+*   **Output**: `ase.Atoms` with `energy` and `forces` set to these *Delta* values.
 
-1.  **MD Phase**:
-    *   **Input**: `current_potential.yace`, Initial Structure.
-    *   **Process**: LAMMPS runs. `pace/extrapolation` computes $\gamma$ per atom.
-    *   **Trigger**: Max $\gamma >$ Threshold.
-    *   **Output**: Halted State (Snapshot of all atoms + $\gamma$ values).
+### 3.5 Trainer (`AceTrainer`)
+*   **Tools**: Wraps `pacemaker` CLI tools.
+*   **Data Handling**:
+    *   Maintains a persistent dataset (e.g., `data/training_set.p7z`).
+    *   Converts the new labeled cluster to Pacemaker format (`pandas` DataFrame).
+    *   Ensures `force_weight` column reflects the binary mask (1.0/0.0).
+*   **Training**:
+    *   Executes `pacemaker` to refit the potential.
+    *   Updates `potential.yace` for the next iteration.
 
-2.  **Carving Phase**:
-    *   **Input**: Halted State.
-    *   **Process**: `ClusterCarver` finds max-$\gamma$ atom -> Selects neighbors within $R_{buffer}$ -> Prunes to $<100$ atoms.
-    *   **Output**: `cluster.xyz` (ASE Atoms object).
+---
 
-3.  **Labeling Phase**:
-    *   **Input**: `cluster.xyz`.
-    *   **Process**:
-        *   Compute $V_{LJ}(cluster)$.
-        *   Run DFT on `cluster`.
-        *   Subtract: Target = DFT - LJ.
-    *   **Output**: `labeled_cluster.xyz` (with energy/forces/virials properties set to Delta values).
+## 4. Data Persistence & Directory Structure
 
-4.  **Training Phase**:
-    *   **Input**: `labeled_cluster.xyz`, `previous_dataset.p7z`.
-    *   **Process**: Merge data -> Run `pacemaker` optimization.
-    *   **Output**: `new_potential.yace`.
+The system ensures reproducibility and recoverability.
 
-5.  **Resume Phase**:
-    *   **Input**: `new_potential.yace`, Last MD Checkpoint.
-    *   **Process**: Update LAMMPS pair_style -> Continue dynamics.
+```text
+workspace/
+├── config.yaml
+├── start.lmps (Initial structure)
+├── data/
+│   ├── training_set.p7z  (Cumulative dataset)
+│   ├── potential.yace    (Current best potential)
+│   └── iteration_001/
+│       ├── input.lmp
+│       ├── log.lammps
+│       ├── restart.chk
+│       ├── cluster.xyz   (Carved geometry)
+│       ├── qe_input.in
+│       └── qe_output.out
+│   └── iteration_002/
+│       ...
+```
+
+---
+
+## 5. Configuration (`config.yaml`)
+
+All system parameters are centralized.
+
+```yaml
+# Molecular Dynamics Settings
+md_params:
+  dt: 0.001
+  temp: 300
+  n_steps: 1000000
+  restart_freq: 1000    # For "Step Back" strategy
+  uncertainty_threshold: 5.0
+
+# Lennard-Jones Parameters (Baseline & Delta Reference)
+lj_params:
+  epsilon: 0.01
+  sigma: 3.4
+  rcut: 10.0
+
+# Active Learning / Carving
+al_params:
+  r_core: 4.0
+  r_buffer: 6.0
+  max_atoms: 100
+
+# DFT Settings (Quantum Espresso)
+dft_params:
+  command: "mpirun -np 4 pw.x"
+  pseudopotentials: ...
+  kpoints: ...
+
+# Training Settings
+ace_params:
+  ladder_step: 1
+  kappa: 0.6
+```
