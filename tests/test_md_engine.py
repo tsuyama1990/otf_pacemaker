@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pytest
-from src.md_engine import LAMMPSRunner
+from src.md_engine import LAMMPSRunner, LAMMPSInputGenerator
 from src.enums import SimulationState
 
 def test_lammps_input_generation(tmp_path):
@@ -18,10 +18,12 @@ def test_lammps_input_generation(tmp_path):
             'temperature': 300,
             'pressure': 1.0,
             'restart_freq': 1000,
-            'masses': {'Ag': 107.87, 'Pd': 106.42}
+            'masses': {'Ag': 107.87, 'Pd': 106.42},
+            'dump_freq': 1000
         }
 
-        runner = LAMMPSRunner(cmd=cmd, lj_params=lj_params, md_params=md_params)
+        input_generator = LAMMPSInputGenerator(lj_params=lj_params, md_params=md_params)
+        runner = LAMMPSRunner(cmd=cmd, input_generator=input_generator)
 
         potential_path = "test_pot.yace"
         steps = 100
@@ -30,10 +32,6 @@ def test_lammps_input_generation(tmp_path):
 
         Path(input_structure).touch()
         Path("log.lammps").touch()
-
-        # Mock subprocess to avoid error because 'echo -in in.lammps' echoes but doesn't produce log file content check
-        # But we are testing input generation mostly.
-        # We need to ensure _execute_lammps doesn't fail immediately.
 
         with patch('subprocess.run') as mock_run:
             mock_run.return_value.returncode = 0

@@ -5,7 +5,7 @@ of the active learning loop, enabling dependency inversion and easier testing.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import List, Optional
 from ase import Atoms
 from src.enums import SimulationState
 
@@ -48,7 +48,7 @@ class Labeler(ABC):
     """Interface for labeling structures (computing targets)."""
 
     @abstractmethod
-    def label(self, structure: Atoms) -> Atoms:
+    def label(self, structure: Atoms) -> Optional[Atoms]:
         """Compute target properties (e.g., forces, energy) for the structure."""
         pass
 

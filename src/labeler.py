@@ -59,15 +59,15 @@ class ShiftedLennardJones(LennardJones):
 class DeltaLabeler(Labeler):
     """Calculates the delta between DFT and reference (LJ) calculations."""
 
-    def __init__(self, qe_calculator: Calculator, lj_params: Dict[str, float]):
+    def __init__(self, reference_calculator: Calculator, baseline_calculator: Calculator):
         """Initialize the DeltaLabeler.
 
         Args:
-            qe_calculator: A configured ASE calculator for the ground truth (DFT).
-            lj_params: A dictionary containing LJ parameters (epsilon, sigma, cutoff).
+            reference_calculator: A configured ASE calculator for the ground truth (DFT).
+            baseline_calculator: A configured ASE calculator for the baseline (e.g. LJ).
         """
-        self.qe_calculator = qe_calculator
-        self.lj_params = lj_params
+        self.reference_calculator = reference_calculator
+        self.baseline_calculator = baseline_calculator
 
     def label(self, structure: Atoms) -> Optional[Atoms]:
         """Compute delta energy, forces, and stress for a given structure.
@@ -80,38 +80,36 @@ class DeltaLabeler(Labeler):
                    Returns None if the DFT calculation fails.
         """
         # Work on copies
-        cluster_dft = structure.copy()
-        cluster_lj = structure.copy()
+        cluster_ref = structure.copy()
+        cluster_base = structure.copy()
 
-        # 1. DFT Calculation
+        # 1. Reference Calculation (DFT)
         try:
-            cluster_dft.calc = self.qe_calculator
-            e_dft = cluster_dft.get_potential_energy()
-            f_dft = cluster_dft.get_forces()
-            s_dft = cluster_dft.get_stress()
+            cluster_ref.calc = self.reference_calculator
+            e_ref = cluster_ref.get_potential_energy()
+            f_ref = cluster_ref.get_forces()
+            s_ref = cluster_ref.get_stress()
         except Exception as e:
-            logger.warning(f"DFT Calculation failed: {e}")
+            logger.warning(f"Reference (DFT) Calculation failed: {e}")
             return None
 
-        # 2. LJ Calculation
-        # Use ShiftedLennardJones to match LAMMPS pair_modify shift yes
-        lj_kwargs = {
-            'epsilon': self.lj_params.get('epsilon', 1.0),
-            'sigma': self.lj_params.get('sigma', 1.0),
-            'rc': self.lj_params.get('cutoff', 2.5)
-        }
-        cluster_lj.calc = ShiftedLennardJones(**lj_kwargs)
-        e_lj = cluster_lj.get_potential_energy()
-        f_lj = cluster_lj.get_forces()
-        s_lj = cluster_lj.get_stress()
+        # 2. Baseline Calculation (LJ)
+        try:
+            cluster_base.calc = self.baseline_calculator
+            e_base = cluster_base.get_potential_energy()
+            f_base = cluster_base.get_forces()
+            s_base = cluster_base.get_stress()
+        except Exception as e:
+            logger.error(f"Baseline (LJ) Calculation failed: {e}")
+            return None
 
         # 3. Compute Delta
-        result_cluster = cluster_dft.copy()
+        result_cluster = cluster_ref.copy()
         result_cluster.calc = None
 
-        e_delta = e_dft - e_lj
-        f_delta = f_dft - f_lj
-        s_delta = s_dft - s_lj
+        e_delta = e_ref - e_base
+        f_delta = f_ref - f_base
+        s_delta = s_ref - s_base
 
         # 4. Store Results
         result_cluster.info['energy'] = e_delta
@@ -119,9 +117,9 @@ class DeltaLabeler(Labeler):
         result_cluster.info['stress'] = s_delta
 
         # Store Raw DFT
-        result_cluster.info['energy_dft_raw'] = e_dft
-        result_cluster.arrays['forces_dft_raw'] = f_dft
-        # result_cluster.info['stress_dft_raw'] = s_dft # Optional
+        result_cluster.info['energy_dft_raw'] = e_ref
+        result_cluster.arrays['forces_dft_raw'] = f_ref
+        # result_cluster.info['stress_dft_raw'] = s_ref # Optional
 
         # Weights
         result_cluster.info['energy_weight'] = 1.0

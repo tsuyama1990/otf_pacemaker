@@ -12,61 +12,14 @@ from src.interfaces import MDEngine
 from src.enums import SimulationState
 
 
-class LAMMPSRunner(MDEngine):
-    """Handles execution of LAMMPS simulations.
+class LAMMPSInputGenerator:
+    """Responsible for generating LAMMPS input scripts."""
 
-    Attributes:
-        cmd: The command to run LAMMPS.
-        lj_params: Dictionary containing Lennard-Jones parameters.
-        md_params: Dictionary containing MD parameters.
-    """
-
-    def __init__(self, cmd: str, lj_params: dict, md_params: dict):
-        """Initialize the LAMMPSRunner.
-
-        Args:
-            cmd: The command string to execute LAMMPS.
-            lj_params: LJ parameters (epsilon, sigma, cutoff).
-            md_params: MD parameters (elements, timestep, temp, press, etc.).
-        """
-        self.cmd = cmd
+    def __init__(self, lj_params: dict, md_params: dict):
         self.lj_params = lj_params
         self.md_params = md_params
 
-    def run(
-        self,
-        potential_path: str,
-        steps: int,
-        gamma_threshold: float,
-        input_structure: str,
-        is_restart: bool = False,
-    ) -> SimulationState:
-        """Run an MD simulation using the specified potential and parameters.
-
-        Args:
-            potential_path: Path to the ACE potential file.
-            steps: Number of MD steps to run.
-            gamma_threshold: Uncertainty threshold to stop the simulation.
-            input_structure: Path to structure file.
-            is_restart: Whether the input_structure is a restart file.
-
-        Returns:
-            SimulationState: The final state of the simulation.
-        """
-        input_file_path = "in.lammps"
-
-        self._write_input_file(
-            input_file_path,
-            potential_path,
-            steps,
-            gamma_threshold,
-            input_structure,
-            is_restart
-        )
-
-        return self._execute_lammps(input_file_path)
-
-    def _write_input_file(
+    def generate(
         self,
         filepath: str,
         potential_path: str,
@@ -142,6 +95,47 @@ class LAMMPSRunner(MDEngine):
         with open(filepath, "w") as f:
             f.write("\n".join(lines))
 
+
+class LAMMPSRunner(MDEngine):
+    """Handles execution of LAMMPS simulations.
+
+    Attributes:
+        cmd: The command to run LAMMPS.
+        input_generator: Component to generate input files.
+    """
+
+    def __init__(self, cmd: str, input_generator: LAMMPSInputGenerator):
+        """Initialize the LAMMPSRunner.
+
+        Args:
+            cmd: The command string to execute LAMMPS.
+            input_generator: Instance of LAMMPSInputGenerator.
+        """
+        self.cmd = cmd
+        self.input_generator = input_generator
+
+    def run(
+        self,
+        potential_path: str,
+        steps: int,
+        gamma_threshold: float,
+        input_structure: str,
+        is_restart: bool = False,
+    ) -> SimulationState:
+        """Run an MD simulation using the specified potential and parameters."""
+        input_file_path = "in.lammps"
+
+        self.input_generator.generate(
+            input_file_path,
+            potential_path,
+            steps,
+            gamma_threshold,
+            input_structure,
+            is_restart
+        )
+
+        return self._execute_lammps(input_file_path)
+
     def _execute_lammps(self, input_file_path: str) -> SimulationState:
         """Executes the LAMMPS command and checks the result."""
         cmd_list = self.cmd.split() + ["-in", input_file_path]
@@ -156,7 +150,6 @@ class LAMMPSRunner(MDEngine):
         # Check log for halt condition
         log_path = "log.lammps"
         if not Path(log_path).exists():
-             # If log wasn't created, check return code
              if result.returncode != 0:
                  return SimulationState.FAILED
              return SimulationState.COMPLETED

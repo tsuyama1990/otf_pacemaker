@@ -52,14 +52,6 @@ class MaxGammaSampler(Sampler):
                 gamma_key = key
                 break
 
-        # Also check if it's inside info (some readers put it there)
-        if not gamma_key:
-             for key in possible_keys:
-                if key in atoms.info:
-                     # If it's in info, it might be a global value, not per-atom.
-                     # But we need per-atom.
-                     pass
-
         if not gamma_key:
             available_keys = list(atoms.arrays.keys())
             raise ValueError(f"Gamma values not found in atoms.arrays. Available keys: {available_keys}. "
@@ -302,9 +294,6 @@ class SmallCellGenerator(StructureGenerator):
             opt = FIRE(ucf, logfile=None)
             opt.run(fmax=0.05, steps=200) # Increased steps slightly to ensure convergence
         except Exception as e:
-            logger.error(f"Relaxation failed: {e}")
-            # We return the atoms as-is if relaxation fails, or maybe raise?
-            # Usually better to return what we have, but labeler might fail later.
-            pass
+            logger.error(f"Relaxation failed: {e}. Proceeding with unrelaxed structure.")
 
         return atoms
