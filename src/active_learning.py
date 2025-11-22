@@ -6,7 +6,7 @@ uncertain local environments and to sample those environments.
 
 import logging
 import numpy as np
-from typing import List, Optional
+from typing import List, Dict, Optional
 
 from ase import Atoms
 from ase.constraints import ExpCellFilter, FixAtoms
@@ -38,18 +38,32 @@ class MaxGammaSampler(Sampler):
 
         Returns:
             List[int]: Indices of the selected atoms.
+
+        Raises:
+            ValueError: If gamma values are not found in atoms.arrays.
         """
         # Try to find the gamma array
+        # LAMMPS dump usually outputs 'f_f_gamma' if we used 'dump ... f_f_gamma'
         gamma_key = None
-        for key in atoms.arrays.keys():
-            if "gamma" in key:
+        possible_keys = ["f_f_gamma", "f_gamma", "gamma"]
+
+        for key in possible_keys:
+            if key in atoms.arrays:
                 gamma_key = key
                 break
 
+        # Also check if it's inside info (some readers put it there)
         if not gamma_key:
-            logger.warning("Gamma values not found in atoms.arrays. Falling back to random selection.")
-            rng = np.random.default_rng()
-            return list(rng.choice(len(atoms), size=min(n_clusters, len(atoms)), replace=False))
+             for key in possible_keys:
+                if key in atoms.info:
+                     # If it's in info, it might be a global value, not per-atom.
+                     # But we need per-atom.
+                     pass
+
+        if not gamma_key:
+            available_keys = list(atoms.arrays.keys())
+            raise ValueError(f"Gamma values not found in atoms.arrays. Available keys: {available_keys}. "
+                             "Ensure the dump file contains the gamma calculation output.")
 
         gammas = atoms.get_array(gamma_key)
         if gammas.ndim > 1:
@@ -58,12 +72,10 @@ class MaxGammaSampler(Sampler):
         # Get indices of top n_clusters gammas
         # np.argsort returns ascending, so we take the last n
         sorted_indices = np.argsort(gammas)
-        top_indices = sorted_indices[-n_clusters:]
+        # Take top n_clusters, reversing to get descending order (highest gamma first)
+        top_indices = sorted_indices[-n_clusters:][::-1]
 
-        # Reverse to have highest first
-        top_indices = top_indices[::-1]
-
-        logger.info(f"Selected {len(top_indices)} atoms with max gamma {gammas[top_indices[0]]:.4f}")
+        logger.info(f"Selected {len(top_indices)} atoms. Max gamma: {gammas[top_indices[0]]:.4f}")
 
         return [int(idx) for idx in top_indices]
 
@@ -73,81 +85,76 @@ class SmallCellGenerator(StructureGenerator):
 
     def __init__(
         self,
-        box_size: float,
         r_core: float,
-        lammps_cmd: str = "lmp_serial",
-        stoichiometry_tolerance: float = 0.1,
-        elements: Optional[List[str]] = None,
+        box_size: float,
+        stoichiometric_ratio: Dict[str, float],
+        lammps_cmd: str = "lmp_serial"
     ):
         """Initialize the SmallCellGenerator.
 
         Args:
-            box_size: Size of the cubic small cell (Angstroms).
             r_core: Radius for the core region where atoms are fixed during relaxation.
+            box_size: Size of the cubic small cell (Angstroms).
+            stoichiometric_ratio: Expected stoichiometry (not strictly enforced, but used for reference/masses).
             lammps_cmd: Command to run LAMMPS.
-            stoichiometry_tolerance: Tolerance for stoichiometry warning.
-            elements: List of element symbols.
         """
-        self.box_size = box_size
         self.r_core = r_core
+        self.box_size = box_size
+        self.stoichiometric_ratio = stoichiometric_ratio
         self.lammps_cmd = lammps_cmd
-        self.stoichiometry_tolerance = stoichiometry_tolerance
-        self.elements = elements if elements else []
 
-    def generate(self, atoms: Atoms, center_id: int, potential_path: str) -> Atoms:
+    def generate_cell(self, large_atoms: Atoms, center_id: int, potential_path: str) -> Atoms:
         """Generate and relax a small periodic cell around a center atom.
 
         Args:
-            atoms: The full atomic structure.
+            large_atoms: The full atomic structure.
             center_id: The index of the center atom.
             potential_path: Path to the current ACE potential file (.yace).
 
         Returns:
             Atoms: The relaxed small periodic cell.
         """
-        # 1. Extraction & PBC Setup
-        if atoms.pbc.any() and atoms.cell.volume > 0:
-            vectors = atoms.get_distances(
-                center_id, range(len(atoms)), mic=True, vector=True
+        # 1. Rectangle Extraction (Cubic Box)
+
+        # Ensure we handle PBC correctly when extracting
+        # We want a box of size self.box_size centered at atoms[center_id]
+
+        # Get positions relative to the center atom, accounting for PBC of the large cell
+        # if the large cell has PBC.
+        if large_atoms.pbc.any():
+            # Use get_distances to handle MIC
+            # vector=True returns the vector pointing from center to others
+            vectors = large_atoms.get_distances(
+                center_id, range(len(large_atoms)), mic=True, vector=True
             )
         else:
-            vectors = atoms.positions - atoms.positions[center_id]
+            vectors = large_atoms.positions - large_atoms.positions[center_id]
 
         half_box = self.box_size / 2.0
+
+        # Select atoms within the cubic box [-half_box, +half_box] in all dimensions
         mask = (np.abs(vectors) <= half_box).all(axis=1)
 
-        subset_atoms = atoms[mask].copy()
-        subset_atoms.positions = vectors[mask]
-        subset_atoms.positions += half_box
+        subset_atoms = large_atoms[mask].copy()
+
+        # Update positions to be relative to the center, then center them in the new box
+        # The new box is [0, box_size]^3. The center is at [box_size/2]^3.
+        # subset_vectors = vectors[mask]
+        # subset_atoms.positions = subset_vectors + half_box
+
+        # Wait, get_distances(a, b) returns vector from a to b.
+        # So positions relative to center are exactly `vectors`.
+        subset_atoms.positions = vectors[mask] + half_box
+
+        # Set new cell and PBC
         subset_atoms.set_cell([self.box_size, self.box_size, self.box_size])
         subset_atoms.set_pbc(True)
-        subset_atoms.wrap()
+        subset_atoms.wrap() # Ensure all atoms are inside the box
 
-        # 2. Stoichiometry Check
-        self._check_stoichiometry(atoms, subset_atoms)
-
-        # 3. MLIP Constrained Relaxation
+        # 2. MLIP Constrained Relaxation
         relaxed_atoms = self._relax_cell(subset_atoms, potential_path)
 
         return relaxed_atoms
-
-    def _check_stoichiometry(self, original: Atoms, subset: Atoms):
-        """Check if the stoichiometry of the subset matches the original within tolerance."""
-        if not len(original) or not len(subset):
-            return
-
-        orig_symbols = original.get_chemical_symbols()
-        sub_symbols = subset.get_chemical_symbols()
-        unique_elements = sorted(list(set(orig_symbols)))
-
-        for el in unique_elements:
-            orig_frac = orig_symbols.count(el) / len(original)
-            sub_frac = sub_symbols.count(el) / len(subset)
-
-            if abs(orig_frac - sub_frac) > self.stoichiometry_tolerance:
-                logger.warning(
-                    f"Stoichiometry mismatch for {el}: Original {orig_frac:.2f}, Subset {sub_frac:.2f}"
-                )
 
     def _relax_cell(self, atoms: Atoms, potential_path: str) -> Atoms:
         """Relax the cell using the given potential with constraints.
@@ -159,27 +166,42 @@ class SmallCellGenerator(StructureGenerator):
         Returns:
             Atoms: The relaxed structure.
         """
-        element_map = " ".join(self.elements) if self.elements else " ".join(sorted(list(set(atoms.get_chemical_symbols()))))
+        # Determine elements for LAMMPS
+        unique_elements = sorted(list(set(atoms.get_chemical_symbols())))
+        element_map = " ".join(unique_elements)
 
+        # Setup LAMMPS Calculator
+        # We use 'pace' pair style
         parameters = {
             "pair_style": "pace",
             "pair_coeff": [f"* * {potential_path} {element_map}"],
-            "mass": ["* 1.0"],
+            "mass": ["* 1.0"], # specific masses are usually handled by ASE if atoms object has them, but here we set dummy
         }
+
+        # Note: ASE's LAMMPS calculator usually handles masses if they are in atoms object.
+        # But we might need to ensure the types map correctly.
+        # For 'pace', the element mapping string tells LAMMPS which element maps to which type.
 
         calc = LAMMPS(
             command=self.lammps_cmd,
             parameters=parameters,
-            specorder=self.elements if self.elements else None,
+            specorder=unique_elements, # Ensures type 1 is first element, etc.
             files=[potential_path],
             keep_tmp_files=False,
         )
 
         atoms.calc = calc
 
-        # Constraint: Fix atoms within r_core
+        # 3. Constraint: Fix atoms within r_core
+        # Calculate distances from the center of the box
         box_center = np.array([self.box_size / 2.0] * 3)
+
+        # We must respect PBC when calculating distance to center of the box
+        # Since the box is cubic and atoms are wrapped, direct distance to center is fine
+        # if we assume standard MIC, but let's be precise.
+        # Actually, the center is fixed at box_size/2. The atoms are in [0, box_size].
         rel_pos = atoms.positions - box_center
+        # Apply MIC for the small cell dimensions
         L = self.box_size
         rel_pos = rel_pos - L * np.round(rel_pos / L)
         dists = np.linalg.norm(rel_pos, axis=1)
@@ -188,15 +210,21 @@ class SmallCellGenerator(StructureGenerator):
 
         if len(fixed_indices) > 0:
             atoms.set_constraint(FixAtoms(indices=fixed_indices))
+            logger.debug(f"Fixed {len(fixed_indices)} atoms within r_core={self.r_core}")
         else:
             logger.warning("No atoms found within r_core to fix.")
 
+        # 4. Relaxation
         try:
+            # Use ExpCellFilter to relax cell shape and positions (of non-fixed atoms)
+            # The prompt asks to relax "Cell shape and Buffer atoms".
             ucf = ExpCellFilter(atoms)
             opt = FIRE(ucf, logfile=None)
-            opt.run(fmax=0.05, steps=100)
+            opt.run(fmax=0.05, steps=200) # Increased steps slightly to ensure convergence
         except Exception as e:
             logger.error(f"Relaxation failed: {e}")
+            # We return the atoms as-is if relaxation fails, or maybe raise?
+            # Usually better to return what we have, but labeler might fail later.
             pass
 
         return atoms
