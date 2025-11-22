@@ -8,11 +8,12 @@ class TestSmallCellGenerator(unittest.TestCase):
     def setUp(self):
         self.box_size = 10.0
         self.r_core = 3.0
+        # Fixed: Removed stoichiometry_tolerance
         self.generator = SmallCellGenerator(
             box_size=self.box_size,
             r_core=self.r_core,
-            stoichiometry_tolerance=0.1,
-            elements=['Fe']
+            stoichiometric_ratio={'Fe': 1.0}, # Updated to correct arg
+            lammps_cmd="lmp_serial"
         )
 
         # Create a dummy atoms object
@@ -36,7 +37,7 @@ class TestSmallCellGenerator(unittest.TestCase):
 
         # Run generate with atom 0 as center
         center_id = 0
-        small_cell = self.generator.generate(self.atoms, center_id, "dummy.yace")
+        small_cell = self.generator.generate_cell(self.atoms, center_id, "dummy.yace") # Updated method name
 
         # Assertions on the generated cell
         self.assertTrue(small_cell.pbc.all())
@@ -59,10 +60,11 @@ class TestSmallCellGenerator(unittest.TestCase):
         mock_opt = MagicMock()
         mock_fire.return_value = mock_opt
 
-        self.generator.generate(self.atoms, 0, "dummy.yace")
+        self.generator.generate_cell(self.atoms, 0, "dummy.yace") # Updated method name
 
         mock_lammps.assert_called()
         args, kwargs = mock_lammps.call_args
+        self.assertIn('parameters', kwargs)
         self.assertIn('pair_style', kwargs['parameters'])
         self.assertEqual(kwargs['parameters']['pair_style'], 'pace')
 
@@ -89,15 +91,13 @@ class TestMaxGammaSampler(unittest.TestCase):
         # Should be sorted max first
         self.assertEqual(indices, [3, 1])
 
-    def test_sample_fallback_random(self):
+    def test_sample_raises_error_on_missing(self):
         sampler = MaxGammaSampler()
         atoms = Atoms('H10')
         # No gamma array
 
-        with self.assertLogs('src.active_learning', level='WARNING') as cm:
-            indices = sampler.sample(atoms, 2)
-            self.assertEqual(len(indices), 2)
-            self.assertTrue(any("Gamma values not found" in o for o in cm.output))
+        with self.assertRaises(ValueError):
+             sampler.sample(atoms, 2)
 
 if __name__ == '__main__':
     unittest.main()

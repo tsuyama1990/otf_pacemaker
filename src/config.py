@@ -19,6 +19,8 @@ class MDParams:
         temperature: Simulation temperature in Kelvin.
         pressure: Simulation pressure in bars.
         n_steps: Number of MD steps to run.
+        restart_freq: Frequency of saving restart files.
+        dump_freq: Frequency of dumping trajectory frames. Recommended to be a divisor of restart_freq for synchronization.
     """
 
     timestep: float

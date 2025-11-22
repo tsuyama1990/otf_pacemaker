@@ -4,12 +4,15 @@ This module calculates the difference between DFT and Empirical Potential (LJ)
 forces and energies to create training labels.
 """
 
-from typing import Dict
+import logging
+from typing import Dict, Optional
 from ase import Atoms
 from ase.calculators.calculator import Calculator
 from ase.calculators.lj import LennardJones
 
 from src.interfaces import Labeler
+
+logger = logging.getLogger(__name__)
 
 
 class DeltaLabeler(Labeler):
@@ -25,7 +28,7 @@ class DeltaLabeler(Labeler):
         self.qe_calculator = qe_calculator
         self.lj_params = lj_params
 
-    def label(self, structure: Atoms) -> Atoms:
+    def label(self, structure: Atoms) -> Optional[Atoms]:
         """Compute delta energy, forces, and stress for a given structure.
 
         Args:
@@ -33,25 +36,21 @@ class DeltaLabeler(Labeler):
 
         Returns:
             Atoms: The cluster with updated energy, forces, and stress representing the delta.
+                   Returns None if the DFT calculation fails.
         """
         # Work on copies
         cluster_dft = structure.copy()
         cluster_lj = structure.copy()
 
         # 1. DFT Calculation
-        cluster_dft.calc = self.qe_calculator
-        e_dft = cluster_dft.get_potential_energy()
-        f_dft = cluster_dft.get_forces()
-        # We assume the calculator supports stress since we need to label it.
-        # If it doesn't, this will raise an error, which is appropriate given requirements.
         try:
-             s_dft = cluster_dft.get_stress()
-        except Exception:
-             # Some calculators might not support stress or require specific params.
-             # We assume the user provided a capable calculator.
-             # Attempting to proceed without stress would violate the "validity" requirement.
-             # Re-raise is appropriate.
-             raise
+            cluster_dft.calc = self.qe_calculator
+            e_dft = cluster_dft.get_potential_energy()
+            f_dft = cluster_dft.get_forces()
+            s_dft = cluster_dft.get_stress()
+        except Exception as e:
+            logger.warning(f"DFT Calculation failed: {e}")
+            return None
 
         # 2. LJ Calculation
         # ASE LennardJones automatically shifts the potential if 'rc' is provided.
