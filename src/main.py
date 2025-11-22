@@ -8,6 +8,7 @@ import sys
 import os
 import shutil
 import numpy as np
+from typing import Optional
 from pathlib import Path
 from ase.io import read
 from ase.calculators.espresso import Espresso
@@ -182,16 +183,17 @@ def run_active_learning_loop(config, md_engine, sampler, generator, labeler, tra
                 if config.md_params.elements:
                      # We might need to map types to symbols if dump doesn't have them
                      # Check if 'type' is present and symbols are 'X'
-                     types = atoms.get_array('type')
-                     elements = config.md_params.elements
-                     symbols = []
-                     for t in types:
-                         # type is 1-based
-                         if 1 <= t <= len(elements):
-                             symbols.append(elements[t-1])
-                         else:
-                             symbols.append("X")
-                     atoms.set_chemical_symbols(symbols)
+                     if 'type' in atoms.arrays:
+                         types = atoms.get_array('type')
+                         elements = config.md_params.elements
+                         symbols = []
+                         for t in types:
+                             # type is 1-based
+                             if 1 <= t <= len(elements):
+                                 symbols.append(elements[t-1])
+                             else:
+                                 symbols.append("X")
+                         atoms.set_chemical_symbols(symbols)
 
                 # Sample
                 center_ids = sampler.sample(atoms, config.al_params.n_clusters)
@@ -206,13 +208,18 @@ def run_active_learning_loop(config, md_engine, sampler, generator, labeler, tra
 
                         # Label
                         labeled_cluster = labeler.label(cell)
+                        if labeled_cluster is None:
+                            logger.warning(f"Labeling failed for cluster {cid}. Skipping.")
+                            continue
+
                         labeled_clusters.append(labeled_cluster)
                     except Exception as e:
                         logger.warning(f"Processing failed for cluster {cid}: {e}. Skipping.")
                         continue
 
                 if not labeled_clusters:
-                    raise RuntimeError("No clusters labeled successfully.")
+                    logger.error("No clusters labeled successfully. Aborting active learning loop.")
+                    break
 
                 # Train
                 logger.info("Training new potential...")

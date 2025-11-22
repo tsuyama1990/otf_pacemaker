@@ -17,7 +17,8 @@ def test_lammps_input_generation(tmp_path):
             'timestep': 0.001,
             'temperature': 300,
             'pressure': 1.0,
-            'restart_freq': 1000
+            'restart_freq': 1000,
+            'masses': {'Ag': 107.87, 'Pd': 106.42}
         }
 
         runner = LAMMPSRunner(cmd=cmd, lj_params=lj_params, md_params=md_params)
@@ -56,6 +57,8 @@ def test_lammps_input_generation(tmp_path):
         assert "fix f_gamma all pair 10 pace/extrapolation gamma 1" in content
         assert "compute c_max_gamma all reduce max f_f_gamma" in content
         assert "fix halt_sim all halt 10 v_max_gamma > 0.15 error continue" in content
+        assert "mass 1 107.87" in content
+        assert "mass 2 106.42" in content
 
     finally:
         os.chdir(original_cwd)
