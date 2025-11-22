@@ -58,7 +58,9 @@ def main():
             "timestep": config.md_params.timestep,
             "temperature": config.md_params.temperature,
             "pressure": config.md_params.pressure,
-            "restart_freq": config.md_params.restart_freq
+            "restart_freq": config.md_params.restart_freq,
+            "dump_freq": config.md_params.dump_freq,
+            "masses": config.md_params.masses
         }
     )
 
@@ -99,6 +101,7 @@ def main():
     # Note: kpts in ASE is usually passed as kpts=(k,k,k) to the constructor, not in input_data['electrons']
 
     qe_calculator = Espresso(
+        command=config.dft_params.command,
         input_data=qe_input_data,
         kpts=config.dft_params.kpts,
         pseudo_dir=config.dft_params.pseudo_dir

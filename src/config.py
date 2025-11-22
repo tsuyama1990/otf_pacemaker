@@ -27,7 +27,9 @@ class MDParams:
     n_steps: int
     elements: list[str]
     initial_structure: str
+    masses: dict[str, float]
     restart_freq: int = 1000
+    dump_freq: int = 1000
 
 
 @dataclass
@@ -59,11 +61,13 @@ class DFTParams:
         ecutwfc: Kinetic energy cutoff for wavefunctions in Ry.
         kpts: k-points mesh grid (e.g., [2, 2, 2]).
         pseudo_dir: Directory containing pseudopotentials.
+        command: Command to execute the DFT code (e.g., 'mpirun -np 4 pw.x -in PREFIX.pwi > PREFIX.pwo').
     """
 
     ecutwfc: float
     kpts: tuple[int, int, int]
     pseudo_dir: str
+    command: str
 
 
 @dataclass
