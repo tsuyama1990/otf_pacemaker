@@ -125,7 +125,7 @@ class LAMMPSRunner:
         # If it halts, we want the state. 'dump' commands are executed every N steps.
         # To ensure we capture the halt state, we dump frequently enough or rely on the restart file?
         # The plan said "Load dump file/snapshot". Let's dump every 10 steps (same as halt check) to be safe/granular.
-        lines.append(f"dump 1 all custom 10 {dump_file_path} id type x y z fx fy fz")
+        lines.append(f"dump 1 all custom 10 {dump_file_path} id type x y z fx fy fz f_f_gamma")
 
         lines.append(f"run {steps}")
 
