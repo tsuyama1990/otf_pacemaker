@@ -25,6 +25,9 @@ class MDParams:
     temperature: float
     pressure: float
     n_steps: int
+    elements: list[str]
+    initial_structure: str
+    restart_freq: int = 1000
 
 
 @dataclass
@@ -36,12 +39,14 @@ class ALParams:
         n_clusters: Number of clusters to extract.
         r_core: Radius for the core region where forces are fully weighted.
         r_buffer: Radius for the buffer region (total cluster radius).
+        initial_potential: str
     """
 
     gamma_threshold: float
     n_clusters: int
     r_core: float
     r_buffer: float
+    initial_potential: str
 
 
 @dataclass
