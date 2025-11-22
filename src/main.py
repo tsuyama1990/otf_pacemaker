@@ -76,7 +76,9 @@ def main():
         r_core=config.al_params.r_core,
         box_size=config.al_params.box_size,
         stoichiometric_ratio=stoich_ratio,
-        lammps_cmd="lmp_serial"
+        lammps_cmd="lmp_serial",
+        min_bond_distance=config.al_params.min_bond_distance,
+        stoichiometry_tolerance=config.al_params.stoichiometry_tolerance
     )
 
     # Labeler
