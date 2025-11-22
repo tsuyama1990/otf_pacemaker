@@ -39,10 +39,10 @@ class DeltaLabeler:
         - arrays['forces'] = F_DFT - F_LJ (Delta Forces)
         - info['energy_dft_raw'] = E_DFT
         - arrays['forces_dft_raw'] = F_DFT
-        - info['energy_weight'] = 0.0 (To disable energy learning)
+        - info['energy_weight'] = 1.0 (Energy learning enabled)
 
         Args:
-            cluster: The atomic cluster to label.
+            cluster: The atomic cluster to label (expected to be the relaxed Small-Cell).
 
         Returns:
             Atoms: The cluster with updated energy and forces representing the delta.
@@ -93,8 +93,9 @@ class DeltaLabeler:
         result_cluster.info['energy_dft_raw'] = e_dft
         result_cluster.arrays['forces_dft_raw'] = f_dft
 
-        # --- 5. Disable Energy Learning ---
-        # Set energy weight to 0.0 so Pacemaker ignores energy in the loss function
-        result_cluster.info['energy_weight'] = 0.0
+        # --- 5. Energy Learning ---
+        # Small-Cell uses periodic boundary conditions and relaxed structures,
+        # so energy is physically meaningful and should be trained.
+        result_cluster.info['energy_weight'] = 1.0
 
         return result_cluster

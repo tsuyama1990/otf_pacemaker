@@ -1,7 +1,7 @@
 """Main controller module for the ACE Active Carver application.
 
 This module orchestrates the active learning loop, connecting the MD engine,
-cluster carving, labeling, and training components.
+small cell generation, labeling, and training components.
 """
 
 import logging
@@ -9,10 +9,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import numpy as np
 
 from ase.io import read
 
-from src.active_learning import ClusterCarver
+from src.active_learning import SmallCellGenerator
 from src.config import Config
 from src.labeler import DeltaLabeler
 from src.md_engine import LAMMPSRunner, SimulationState
@@ -61,10 +62,13 @@ def main():
         }
     )
 
-    # Cluster Carver
-    carver = ClusterCarver(
+    # Small Cell Generator
+    generator = SmallCellGenerator(
+        box_size=config.al_params.box_size,
         r_core=config.al_params.r_core,
-        r_buffer=config.al_params.r_buffer
+        lammps_cmd=lammps_cmd,
+        stoichiometry_tolerance=config.al_params.stoichiometry_tolerance,
+        elements=config.md_params.elements
     )
 
     # Delta Labeler
@@ -246,7 +250,7 @@ def main():
                     logger.error(f"Failed to read dump file: {e}")
                     break
 
-                # 2. Cluster Carving
+                # 2. Identify High-Uncertainty Environment
                 # Identify the atom with the maximum gamma value
                 try:
                     # We added 'f_f_gamma' to the dump command.
@@ -294,17 +298,24 @@ def main():
                     rng = np.random.default_rng()
                     center_ids = rng.choice(len(atoms), size=min(config.al_params.n_clusters, len(atoms)), replace=False)
 
-                clusters = []
                 labeled_clusters = []
 
-                logger.info(f"Extracting and labeling {len(center_ids)} clusters...")
+                logger.info(f"Generating and labeling {len(center_ids)} small cells...")
 
                 for cid in center_ids:
-                    cluster = carver.extract_cluster(atoms, cid)
+                    # Generate relaxed small cell
+                    try:
+                        # Copy potential to a location where it can be accessed by generator
+                        # Generator runs LAMMPS, which needs the file.
+                        # We are in work_dir. abs_potential_path is absolute.
+                        cell = generator.generate_cell(atoms, cid, str(abs_potential_path))
+                    except Exception as e:
+                        logger.error(f"Small cell generation failed for atom {cid}: {e}")
+                        continue
 
                     # 3. Labeling
                     try:
-                        labeled_cluster = labeler.compute_delta(cluster)
+                        labeled_cluster = labeler.compute_delta(cell)
                         labeled_clusters.append(labeled_cluster)
                     except Exception as e:
                         logger.warning(f"DFT Labeling failed for cluster {cid}: {e}. Skipping.")
