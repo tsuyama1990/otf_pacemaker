@@ -247,23 +247,52 @@ def main():
                     break
 
                 # 2. Cluster Carving
-                # We extract clusters. How many?
-                # The plan says "Carving -> Labeling".
-                # We need to find high uncertainty atoms?
-                # The prompt says "extract_cluster(atoms, center_id)".
-                # Which center_id?
-                # Ideally, we find the atom with max gamma.
-                # But we don't have gamma per atom in the dump file unless we computed and dumped it.
-                # The `fix halt` computed `max_gamma`.
-                # The dump contains fx fy fz, but not gamma.
-                # Users `active_learning.py` `ClusterCarver` just takes `center_id`.
-                # We should probably pick random atoms or all atoms?
-                # Or, maybe we just pick a few random ones as per `n_clusters`.
+                # Identify the atom with the maximum gamma value
+                try:
+                    # We added 'f_f_gamma' to the dump command.
+                    # ASE reads custom columns into atoms.arrays if formatted as 'f_name'.
+                    # The column name in dump was 'f_f_gamma', so ASE should read it as 'f_gamma' or similar?
+                    # Standard behavior: 'f_name' -> 'name' in arrays? Or remains 'f_name'.
+                    # ASE lammps-dump-text reader typically parses columns.
+                    # Let's assume it's available in arrays. We might need to inspect keys if unsure.
+                    # Usually for `f_f_gamma`, it might appear as `f_gamma` or `f_f_gamma` depending on ASE version.
+                    # But typically ASE tries to be smart. Let's check generic keys.
+                    gamma_key = None
+                    for key in atoms.arrays.keys():
+                        if "gamma" in key:
+                            gamma_key = key
+                            break
 
-                import numpy as np
-                rng = np.random.default_rng()
-                # Randomly select n_clusters indices
-                center_ids = rng.choice(len(atoms), size=min(config.al_params.n_clusters, len(atoms)), replace=False)
+                    if gamma_key:
+                        gammas = atoms.get_array(gamma_key)
+                        # Find index of max gamma
+                        # If gammas is 1D or 2D (N, 1), handle it.
+                        if gammas.ndim > 1:
+                            gammas = gammas.flatten()
+
+                        # Identify the atom ID with max gamma
+                        # Note: 'atoms' index vs 'id'. We need the index for extract_cluster (which takes index).
+                        max_gamma_idx = int(np.argmax(gammas))
+                        logger.info(f"Max gamma found: {gammas[max_gamma_idx]} at atom index {max_gamma_idx}")
+
+                        # We select this one.
+                        center_ids = [max_gamma_idx]
+
+                        # If we need more clusters (n_clusters > 1), we could pick top N?
+                        # The requirement says: "Identify 'Atom with max gamma' and use as center_id".
+                        # Use singular. But loop below iterates center_ids.
+                        # Let's stick to just the max one as per instructions: "identify 'gamma value max atom' and make it center_id".
+                    else:
+                        logger.warning("Gamma values not found in dump file. Falling back to random selection.")
+                        import numpy as np
+                        rng = np.random.default_rng()
+                        center_ids = rng.choice(len(atoms), size=min(config.al_params.n_clusters, len(atoms)), replace=False)
+
+                except Exception as e:
+                    logger.error(f"Error processing gamma values: {e}. Falling back to random.")
+                    import numpy as np
+                    rng = np.random.default_rng()
+                    center_ids = rng.choice(len(atoms), size=min(config.al_params.n_clusters, len(atoms)), replace=False)
 
                 clusters = []
                 labeled_clusters = []

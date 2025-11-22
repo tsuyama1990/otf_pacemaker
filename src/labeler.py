@@ -39,6 +39,7 @@ class DeltaLabeler:
         - arrays['forces'] = F_DFT - F_LJ (Delta Forces)
         - info['energy_dft_raw'] = E_DFT
         - arrays['forces_dft_raw'] = F_DFT
+        - info['energy_weight'] = 0.0 (To disable energy learning)
 
         Args:
             cluster: The atomic cluster to label.
@@ -49,50 +50,51 @@ class DeltaLabeler:
         Raises:
             Exception: If the DFT calculation fails (re-raises the underlying exception).
         """
+        # Work on copies to ensure isolation and prevent side effects (e.g. reordering)
+        cluster_dft = cluster.copy()
+        cluster_lj = cluster.copy()
+
         # --- 1. DFT Calculation ---
-        cluster.calc = self.qe_calculator
+        cluster_dft.calc = self.qe_calculator
         try:
             # Trigger calculation
-            e_dft = cluster.get_potential_energy()
-            f_dft = cluster.get_forces()
+            e_dft = cluster_dft.get_potential_energy()
+            f_dft = cluster_dft.get_forces()
         except Exception as e:
             # Explicitly re-raise the exception to notify the caller of failure
             raise e
 
-        # Backup raw DFT values
-        cluster.info['energy_dft_raw'] = e_dft
-        cluster.arrays['forces_dft_raw'] = f_dft.copy()
-
         # --- 2. LJ Calculation ---
-        # Initialize LJ calculator with stored parameters
-        # LennardJones calculator uses 'rc' for cutoff usually, but let's check standard usage.
-        # ase.calculators.lj.LennardJones(epsilon=1.0, sigma=1.0, rc=None, ro=None)
-        # Our config uses 'cutoff', which likely maps to 'rc'.
-
+        # LennardJones calculator uses 'rc' for cutoff
         lj_kwargs = {
             'epsilon': self.lj_params.get('epsilon', 1.0),
             'sigma': self.lj_params.get('sigma', 1.0),
             'rc': self.lj_params.get('cutoff', 2.5)
         }
 
-        cluster.calc = LennardJones(**lj_kwargs)
+        cluster_lj.calc = LennardJones(**lj_kwargs)
 
-        e_lj = cluster.get_potential_energy()
-        f_lj = cluster.get_forces()
+        e_lj = cluster_lj.get_potential_energy()
+        f_lj = cluster_lj.get_forces()
 
         # --- 3. Compute Delta ---
+        # Use the DFT cluster as the base for the result to preserve its structure/properties
+        result_cluster = cluster_dft.copy()
+        result_cluster.calc = None  # Detach calculator
+
         e_delta = e_dft - e_lj
         f_delta = f_dft - f_lj
 
-        # --- 4. Store Delta as Primary Labels ---
-        # We do not set atoms.calc to None or a specific calculator that holds these,
-        # instead we store them directly in info/arrays as if they were results.
-        # However, calling get_potential_energy() again might trigger a recalc if a calculator is attached.
-        # Pacemaker typically reads from info/arrays directly if loaded from pickle.
-        # To be safe, we can remove the calculator so ASE doesn't try to recompute.
-        cluster.calc = None
+        # --- 4. Store Results ---
+        result_cluster.info['energy'] = e_delta
+        result_cluster.arrays['forces'] = f_delta
 
-        cluster.info['energy'] = e_delta
-        cluster.arrays['forces'] = f_delta
+        # Store Raw DFT
+        result_cluster.info['energy_dft_raw'] = e_dft
+        result_cluster.arrays['forces_dft_raw'] = f_dft
 
-        return cluster
+        # --- 5. Disable Energy Learning ---
+        # Set energy weight to 0.0 so Pacemaker ignores energy in the loss function
+        result_cluster.info['energy_weight'] = 0.0
+
+        return result_cluster
