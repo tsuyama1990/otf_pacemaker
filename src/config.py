@@ -34,10 +34,14 @@ class ALParams:
     Attributes:
         gamma_threshold: Uncertainty threshold for stopping the simulation.
         n_clusters: Number of clusters to extract.
+        r_core: Radius for the core region where forces are fully weighted.
+        r_buffer: Radius for the buffer region (total cluster radius).
     """
 
     gamma_threshold: float
     n_clusters: int
+    r_core: float
+    r_buffer: float
 
 
 @dataclass
