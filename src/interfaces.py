@@ -39,7 +39,7 @@ class StructureGenerator(ABC):
     """Interface for generating training structures."""
 
     @abstractmethod
-    def generate(self, atoms: Atoms, center_id: int, potential_path: str) -> Atoms:
+    def generate_cell(self, large_atoms: Atoms, center_id: int, potential_path: str) -> Atoms:
         """Generate a structure (e.g., small cell) around a center atom."""
         pass
 

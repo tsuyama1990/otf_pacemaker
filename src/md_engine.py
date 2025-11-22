@@ -132,6 +132,7 @@ class LAMMPSRunner(MDEngine):
 
         # Restart and Dump
         lines.append(f"restart {restart_freq} restart.chk")
+        # We dump f_f_gamma to track uncertainty
         lines.append(f"dump 1 all custom {dump_freq} dump.lammpstrj id type x y z fx fy fz f_f_gamma")
 
         lines.append(f"run {steps}")
@@ -153,9 +154,7 @@ class LAMMPSRunner(MDEngine):
         # Check log for halt condition
         log_path = "log.lammps"
         if not Path(log_path).exists():
-             # If log wasn't created, maybe it failed early or stdout was used?
-             # Standard LAMMPS creates log.lammps unless -log none is passed.
-             # If result.returncode is not 0, it failed.
+             # If log wasn't created, check return code
              if result.returncode != 0:
                  return SimulationState.FAILED
              return SimulationState.COMPLETED
