@@ -50,38 +50,121 @@ def test_kmc_run_step_structure(mock_fire, mock_dimer_control, mock_min_mode):
     mock_opt_instance.converged.return_value = True
     mock_fire.return_value = mock_opt_instance
 
-    # Mock MinModeAtoms to return energy for barrier check
     mock_min_mode_instance = MagicMock()
     mock_min_mode_instance.get_potential_energy.return_value = 1.0 # Saddle E
-    # We also need atoms to have E
-    # engine.run_step calls atoms.get_potential_energy() via ase calc (mocked) or directly.
-    # Since we mocked the calc, we should mock get_potential_energy on atoms or calc.
-    # But MinModeAtoms is mocked, so dimer_atoms.get_potential_energy() returns MagicMock.
-
     mock_min_mode.return_value = mock_min_mode_instance
 
+    # DummyExecutor to avoid multiprocessing
+    class DummyExecutor:
+        def __init__(self, max_workers=1): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def submit(self, fn, *args, **kwargs):
+            res = fn(*args, **kwargs)
+            f = MagicMock()
+            f.result.return_value = res
+            return f
+
+    def dummy_as_completed(futures):
+        return futures
+
     # Run
-    with patch("src.engines.kmc.PyACECalculator") as mock_calc_cls:
+    with patch("src.engines.kmc.ProcessPoolExecutor", side_effect=DummyExecutor), \
+         patch("src.engines.kmc.as_completed", side_effect=dummy_as_completed), \
+         patch("src.engines.kmc.PyACECalculator") as mock_calc_cls:
+
         # Mock calculator
         mock_calc = MagicMock()
         mock_calc.results.get.return_value = None
         mock_calc.get_potential_energy.return_value = 0.0 # Initial E
         mock_calc_cls.return_value = mock_calc
 
-        # We need to make sure the atoms copy in run_step gets this mock calc.
-        # And that get_potential_energy returns float.
-
-        # When engine calls atoms.get_potential_energy(), it calls calc.get_potential_energy().
-
         result = engine.run_step(atoms, "pot.yace")
 
     # Barrier = 1.0 - 0.0 = 1.0 > 0.01. So event is found.
-
     assert isinstance(result, KMCResult)
-    # Since we found an event, status should be SUCCESS (or NO_EVENT if rate calc fails/randomness)
-    # Rate calc: barrier=1.0. T=300. Rate ~ exp(-40) ~ very small.
-    # But random choice might select it if it's the only one.
     assert result.status in [KMCStatus.SUCCESS, KMCStatus.NO_EVENT]
+
+@patch("src.engines.kmc.MinModeAtoms")
+@patch("src.engines.kmc.DimerControl")
+@patch("src.engines.kmc.FIRE")
+def test_kmc_parallel_execution(mock_fire, mock_dimer_control, mock_min_mode):
+    """Test that parallel execution path runs without error."""
+    # We use n_workers=2
+    kmc_params = KMCParams(active=True, n_searches=2, n_workers=2)
+    al_params = ALParams(
+        gamma_threshold=10.0,
+        n_clusters=1,
+        r_core=1.0,
+        box_size=10.0,
+        initial_potential="pot.yace",
+        potential_yaml_path="pot.yaml"
+    )
+    engine = OffLatticeKMCEngine(kmc_params, al_params)
+
+    atoms = Atoms("H2", positions=[[0,0,0], [1,0,0]])
+
+    # Mock FIRE
+    mock_opt = MagicMock()
+    mock_opt.converged.return_value = True
+    mock_fire.return_value = mock_opt
+
+    mock_min_mode.return_value.get_potential_energy.return_value = 1.0
+
+    class DummyExecutor:
+        def __init__(self, max_workers=1): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def submit(self, fn, *args, **kwargs):
+            # The real submit calls fn(*args, **kwargs).
+            res = fn(*args, **kwargs)
+            f = MagicMock()
+            f.result.return_value = res
+            return f
+
+    def dummy_as_completed(futures):
+        return futures
+
+    with patch("src.engines.kmc.ProcessPoolExecutor", side_effect=DummyExecutor), \
+         patch("src.engines.kmc.as_completed", side_effect=dummy_as_completed), \
+         patch("src.engines.kmc.PyACECalculator") as mock_calc_cls:
+
+        mock_calc = MagicMock()
+        mock_calc.results.get.return_value = None
+        mock_calc.get_potential_energy.return_value = 0.0
+        mock_calc_cls.return_value = mock_calc
+
+        result = engine.run_step(atoms, "pot.yace")
+
+        # Should run successfully
+        assert isinstance(result, KMCResult)
+
+@patch("src.engines.kmc.MinModeAtoms")
+@patch("src.engines.kmc.DimerControl")
+@patch("src.engines.kmc.FIRE")
+def test_active_region_selection(mock_fire, mock_dimer_control, mock_min_mode):
+    from src.engines.kmc import _select_active_atoms
+
+    # Setup atoms: 2 atoms, one at z=0, one at z=15
+    atoms = Atoms("CoTi", positions=[[0,0,0], [0,0,15]])
+
+    # 1. Surface mode
+    params = KMCParams(active_region_mode="surface", active_z_cutoff=10.0)
+    indices = _select_active_atoms(atoms, params)
+    assert len(indices) == 1
+    assert indices[0] == 1 # The one at z=15
+
+    # 2. Species mode
+    params = KMCParams(active_region_mode="species", active_species=["Co"])
+    indices = _select_active_atoms(atoms, params)
+    assert len(indices) == 1
+    assert indices[0] == 0 # Co is at index 0
+
+    # 3. Both
+    params = KMCParams(active_region_mode="surface_and_species", active_z_cutoff=10.0, active_species=["Ti"])
+    indices = _select_active_atoms(atoms, params)
+    assert len(indices) == 1
+    assert indices[0] == 1 # Ti at z=15
 
 @patch("src.engines.kmc.MinModeAtoms")
 @patch("src.engines.kmc.DimerControl")
@@ -105,7 +188,29 @@ def test_kmc_high_gamma_interruption(mock_fire, mock_dimer_control, mock_min_mod
     mock_opt_instance.converged.return_value = False
     mock_fire.return_value = mock_opt_instance
 
-    with patch("src.engines.kmc.PyACECalculator") as mock_calc_cls:
+    class DummyExecutor:
+        def __init__(self, max_workers=1): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def submit(self, fn, *args, **kwargs):
+            try:
+                res = fn(*args, **kwargs)
+                f = MagicMock()
+                f.result.return_value = res
+                return f
+            except Exception as e:
+                # If execution fails, return a future that raises exception
+                f = MagicMock()
+                f.result.side_effect = e
+                return f
+
+    def dummy_as_completed(futures):
+        return futures
+
+    with patch("src.engines.kmc.ProcessPoolExecutor", side_effect=DummyExecutor), \
+         patch("src.engines.kmc.as_completed", side_effect=dummy_as_completed), \
+         patch("src.engines.kmc.PyACECalculator") as mock_calc_cls:
+
         # Mock calculator to return high gamma
         mock_calc = MagicMock()
         mock_calc.results.get.return_value = [1.0, 0.2] # Max 1.0 > 0.5
@@ -113,4 +218,5 @@ def test_kmc_high_gamma_interruption(mock_fire, mock_dimer_control, mock_min_mod
 
         result = engine.run_step(atoms, "pot.yace")
 
-    assert result.status == KMCStatus.UNCERTAIN
+        # Verify status
+        assert result.status == KMCStatus.UNCERTAIN
