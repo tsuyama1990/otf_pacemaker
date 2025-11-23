@@ -2,136 +2,176 @@
 
 Uncertainty-driven on-the-fly active learning system using [Pacemaker](https://github.com/ICAMS/pacemaker) (ACE potentials) and [LAMMPS](https://www.lammps.org/).
 
-This project implements a **Delta-Learning** workflow where an Atomic Cluster Expansion (ACE) potential is trained to correct the difference between an empirical potential (Lennard-Jones) and First-Principles calculations (DFT/Espresso). The system autonomously explores the phase space using Molecular Dynamics (MD) and triggers retraining whenever the uncertainty of the ACE potential exceeds a predefined threshold.
+This project implements a **Hybrid MD-kMC Active Learning** framework where an Atomic Cluster Expansion (ACE) potential is trained to correct the difference between an empirical potential (Lennard-Jones) and First-Principles calculations (DFT/Espresso). The system autonomously explores phase space using both Molecular Dynamics (MD) for thermal sampling and Kinetic Monte Carlo (kMC) for rare-event evolution, triggering retraining whenever the model's uncertainty exceeds a threshold.
 
-## Architecture
+## Table of Contents
+1. [Prerequisites & Build Up](#prerequisites--build-up)
+2. [Structure Generation](#structure-generation)
+3. [Labeling (Delta Learning)](#labeling-delta-learning)
+4. [Training](#training)
+5. [Simulation Modes](#simulation-modes)
+    - [Conventional MD](#conventional-md)
+    - [Conventional kMC](#conventional-kmc)
+    - [Hybrid MD/kMC Active Learning](#hybrid-mdkmc-active-learning)
+6. [Usage](#usage)
+7. [Configuration](#configuration)
 
-The active learning loop consists of the following steps:
+---
 
-1.  **MD Simulation**: Runs a Molecular Dynamics simulation using LAMMPS with a hybrid potential (`lj/cut` + `pace/extrapolation`).
-2.  **Uncertainty Detection**: Monitors the extrapolation grade ($\gamma$) of the ACE potential on-the-fly via `fix pace/extrapolation`. If $\gamma$ exceeds a threshold, the simulation halts.
-3.  **Cluster Carving**: Extracts atomic clusters centered on high-uncertainty regions from the MD snapshot.
-4.  **Labeling**: Computes the target values (Energy/Forces) for the clusters using Quantum Espresso (DFT) and subtracts the baseline LJ contribution.
-    $$ E_{target} = E_{DFT} - E_{LJ} $$
-    $$ F_{target} = F_{DFT} - F_{LJ} $$
-5.  **Training**: Retrains/Fine-tunes the ACE potential using Pacemaker on the newly labeled dataset.
-6.  **Resume**: Resumes the MD simulation from the last checkpoint using the updated potential.
+## Prerequisites & Build Up
 
-## Prerequisites
+This project relies on a specific ecosystem of tools.
 
-- **OS**: Linux (Ubuntu/Debian recommended)
-- **Python**: 3.10
-- **Package Manager**: [uv](https://github.com/astral-sh/uv)
-- **DFT Software**: Quantum Espresso (`pw.x` executable reachable in PATH).
-- **Compilers**: C++ compiler (g++ / clang++) supporting C++11 or later, CMake.
+### 1. System Requirements
+- **OS**: Linux (Ubuntu/Debian recommended).
+- **Python**: 3.10.
+- **Package Manager**: [uv](https://github.com/astral-sh/uv).
+- **Compilers**: C++11 compatible compiler (g++/clang++), CMake.
+- **DFT Engine**: Quantum Espresso (`pw.x` in PATH).
 
-## Setup
+### 2. Environment Setup
+Install `uv` and initialize the Python environment:
+```bash
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-1. **Install uv** (if not already installed):
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
-
-2. **Initialize Environment**:
-   Run the setup script to install Python dependencies:
-   ```bash
-   ./setup_env.sh
-   ```
-
-3. **Install LAMMPS (Manual Step)**
-   The project requires a custom build of LAMMPS with the `ML-PACE` package enabled.
-
-   **Build Instructions:**
-   ```bash
-   # 1. Clone LAMMPS
-   git clone -b stable https://github.com/lammps/lammps.git mylammps
-   cd mylammps
-
-   # 2. Build
-   mkdir build && cd build
-   cmake ../cmake \
-       -D PKG_PYTHON=ON \
-       -D PKG_ML-PACE=ON \
-       -D BUILD_SHARED_LIBS=ON \
-       -D PYTHON_EXECUTABLE=$(uv python find)
-
-   make -j$(nproc)
-
-   # 3. Set environment variables
-   # Add the build folder to LD_LIBRARY_PATH so Python can find liblammps.so
-   export LD_LIBRARY_PATH=$PWD:$LD_LIBRARY_PATH
-   ```
-
-## Configuration
-
-The system is configured via `config.yaml`. The file should contain the following sections:
-
-```yaml
-md_params:
-  elements: ["Ag", "Pd"]       # List of element symbols
-  timestep: 0.001              # MD timestep in ps
-  temperature: 300.0           # Temperature in Kelvin
-  pressure: 1.0                # Pressure in bar
-  restart_freq: 1000           # Frequency of writing restart files
-  n_steps: 100000              # Total steps per iteration
-  initial_structure: "start.data" # Path to initial LAMMPS data file
-
-al_params:
-  r_core: 4.0                  # Core radius for cluster carving
-  r_buffer: 2.0                # Buffer radius for cluster carving
-  gamma_threshold: 2.0         # Uncertainty threshold to trigger AL
-  n_clusters: 5                # Number of clusters to extract per halt
-  initial_potential: "pot.yace" # Path to initial ACE potential
-
-dft_params:
-  pseudo_dir: "./pseudos"      # Directory containing pseudopotentials
-  ecutwfc: 40.0                # Wavefunction cutoff (Ry)
-  kpts: [2, 2, 2]              # K-points grid
-
-lj_params:
-  epsilon: 1.0
-  sigma: 1.0
-  cutoff: 2.5
+# Install python dependencies (creates .venv)
+./setup_env.sh
 ```
+
+### 3. Compiling LAMMPS with ML-PACE
+The system requires a custom LAMMPS build with the `ML-PACE` package enabled to run ACE potentials.
+
+```bash
+# Clone LAMMPS stable branch
+git clone -b stable https://github.com/lammps/lammps.git mylammps
+cd mylammps
+
+# Create build directory
+mkdir build && cd build
+
+# Configure with CMake
+# Ensure you point PYTHON_EXECUTABLE to the uv environment python
+cmake ../cmake \
+    -D PKG_PYTHON=ON \
+    -D PKG_ML-PACE=ON \
+    -D BUILD_SHARED_LIBS=ON \
+    -D PYTHON_EXECUTABLE=$(uv python find)
+
+# Build
+make -j$(nproc)
+
+# Install or Set Library Path
+export LD_LIBRARY_PATH=$PWD:$LD_LIBRARY_PATH
+```
+
+---
+
+## Structure Generation
+
+The **Seed Generation** phase (Phase 1) creates the initial training set if no potential exists. It is handled by `src/workflows/seed_generation.py` and includes:
+
+1.  **Random Generation**: Uses `pyxtal` to generate diverse random crystal structures.
+2.  **Scenario-Driven Generation**: Generates specific configurations like Surfaces, Interfaces, and Defects using `src/scenario_generation`.
+3.  **Pre-optimization**: Relaxes structures using a foundational model (MACE) to remove unphysical high-energy states.
+4.  **Sampling**: Selects the most diverse structures using `DirectSampler` (ACE descriptors + BIRCH clustering).
+
+**Usage**: Automatically triggered by `src/main.py` if `initial_potential` is missing.
+
+---
+
+## Labeling (Delta Learning)
+
+The project uses a **Delta-Learning** strategy implemented in `src/labeling/strategies/delta_labeler.py`.
+The target for machine learning is the difference between DFT and a baseline empirical potential.
+
+$$ E_{target} = E_{DFT} - E_{LJ} $$
+$$ F_{target} = F_{DFT} - F_{LJ} $$
+
+-   **Interface**: `DeltaLabeler` uses `ase.calculators.espresso.Espresso` for DFT and `ShiftedLennardJones` for the baseline.
+-   **Parallelism**: Labeling tasks are executed in parallel using `ProcessPoolExecutor`, with each task running in an isolated temporary directory to prevent file conflicts.
+
+---
+
+## Training
+
+Training is performed using **Pacemaker** via the `PacemakerTrainer` class in `src/training/strategies/pacemaker.py`.
+
+-   **Active Set Management**: Before retraining, the Basis Set (`.asi` file) is updated using `pace_activeset` to include new chemical environments.
+-   **Fine-Tuning**: Retraining typically starts from the previous potential (Warm Start) to accelerate convergence.
+-   **Output**: Produces a `.yace` (YAML ACE) potential file used by LAMMPS.
+
+---
+
+## Simulation Modes
+
+### Conventional MD
+Handled by `LAMMPSRunner` in `src/engines/lammps/runner.py`.
+-   Runs `lmp_serial` (or configured command) via `subprocess`.
+-   Dynamically generates `in.lammps` input files.
+-   **Uncertainty**: Monitors `fix pace/extrapolation`. If the extrapolation grade $\gamma$ exceeds `gamma_threshold`, the simulation halts, returning `SimulationState.UNCERTAIN`.
+
+### Conventional kMC
+Handled by `OffLatticeKMCEngine` in `src/engines/kmc.py`.
+-   **Algorithm**: Off-Lattice kMC using the Dimer method for saddle point search.
+-   **Graph-Based Cluster Move**: Identifies moving molecules/clusters using Numba-optimized BFS on CSR matrices (`scipy.sparse`).
+-   **Parallel Search**: Dispatches multiple dimer searches in parallel processes.
+-   **Uncertainty**: Checks $\gamma$ during the dimer search (FineTuna-style). If high uncertainty is found, the search aborts and triggers Active Learning.
+
+### Hybrid MD/kMC Active Learning
+The core workflow is orchestrated by `ActiveLearningOrchestrator` in `src/workflows/orchestrator.py`.
+
+1.  **MD Phase**: Thermal sampling. If uncertainty -> Halt -> Train -> Resume.
+2.  **MD Complete**: Pass final structure to kMC.
+3.  **kMC Phase**: Rare event evolution. If uncertainty -> Halt -> Train -> Retry.
+4.  **Loop**: Cycle continues indefinitely or until max steps.
+
+---
 
 ## Usage
 
-Ensure your environment is activated and dependencies are installed.
+1.  **Activate Environment**:
+    ```bash
+    source .venv/bin/activate
+    ```
 
-```bash
-# Activate virtual environment
-source .venv/bin/activate
+2.  **Configure**:
+    Edit `config.yaml` to set your system parameters (elements, temperature, DFT settings).
 
-# Run the main controller
-python src/main.py
+3.  **Run**:
+    ```bash
+    # Runs the main active learning loop
+    # Automatically runs Seed Generation if needed
+    python src/main.py
+    ```
+
+4.  **Output**:
+    -   `data/seed/`: Initial training data and potential.
+    -   `data/iteration_X/`: Data for each AL cycle (MD dumps, trained potentials, logs).
+    -   `training_log.csv`: Metrics (RMSE, Gamma, Active Set Size).
+
+---
+
+## Configuration
+
+The `config.yaml` file controls all aspects of the simulation.
+
+```yaml
+md_params:
+  elements: ["Ag", "Pd"]
+  temperature: 300.0
+  n_steps: 100000
+
+al_params:
+  gamma_threshold: 2.0  # Uncertainty limit
+  initial_potential: "data/seed/seed_potential.yace"
+
+kmc_params:
+  active: true          # Enable Hybrid MD-kMC
+  n_workers: 4          # Parallel saddle searches
+  temperature: 300.0
+
+dft_params:
+  command: "pw.x -in espresso.pwi > espresso.pwo"
+  pseudo_dir: "/path/to/pseudos"
 ```
-
-The system will create `data/iteration_X` directories for each AL cycle, storing logs, dumps, and trained potentials.
-
-## Testing
-
-The project includes a suite of unit and integration tests using `pytest`.
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run with output logging
-pytest -s tests/
-```
-
-### Test Scope
-- **Unit Tests**: Verify Delta calculation logic (checking $E_{DFT} - E_{LJ}$) and LAMMPS input file generation.
-- **Integration Tests**: Mock the entire AL loop (LAMMPS, Espresso, Pacemaker) to verify the workflow logic (Halt -> Train -> Resume).
-
-## Directory Structure
-
-- `src/`: Source code
-    - `main.py`: Main controller loop.
-    - `md_engine.py`: Interface with LAMMPS.
-    - `labeler.py`: Delta-learning label generation.
-    - `trainer.py`: Interface with Pacemaker.
-    - `active_learning.py`: Cluster carving logic.
-    - `config.py`: Configuration data classes.
-- `tests/`: Test files (`test_integration.py`, `test_labeler.py`, `test_md_engine.py`).
-- `data/`: Runtime data storage (ignored by git).
