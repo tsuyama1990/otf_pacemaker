@@ -2,6 +2,7 @@
 
 This module implements the Off-Lattice KMC Engine using ASE Dimer method
 and Pacemaker potential with k-step uncertainty checking.
+It uses Graph-Based Local Cluster identification (Numba-optimized) to move molecules/clusters naturally.
 """
 
 import logging
@@ -21,11 +22,23 @@ except ImportError:
     # Fallback for environments where pyace is not installed (e.g. testing)
     PyACECalculator = None
 
+try:
+    from numba import jit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    # Dummy decorator if numba is missing
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
 from src.core.interfaces import KMCEngine, KMCResult
 from src.core.enums import KMCStatus
 from src.core.config import KMCParams, ALParams
 
 logger = logging.getLogger(__name__)
+
 
 def _setup_calculator(atoms: Atoms, potential_path: str):
     """Attach the Pacemaker calculator to the atoms.
@@ -42,256 +55,77 @@ def _setup_calculator(atoms: Atoms, potential_path: str):
     calc = PyACECalculator(potential_path)
     atoms.calc = calc
 
-def _carve_cluster(full_atoms: Atoms, center_idx: int, box_size: float, buffer_width: float) -> Tuple[Atoms, List[int]]:
-    """Carve a cubic cluster around the target atom and apply fixed boundaries.
+
+@jit(nopython=True)
+def _bfs_traversal_numba(
+    start_node: int,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    cns: np.ndarray,
+    cn_cutoff: int,
+    num_atoms: int
+) -> np.ndarray:
+    """
+    BFS traversal using Numba.
 
     Args:
-        full_atoms: The full system structure (PBC enabled).
-        center_idx: Index of the center atom.
-        box_size: Side length of the cubic box (Angstroms).
-        buffer_width: Width of the outer fixed shell.
+        start_node: Starting atom index.
+        indices: CSR matrix indices array (neighbors).
+        indptr: CSR matrix indptr array (offsets).
+        cns: Array of CNs for all atoms.
+        cn_cutoff: Cutoff for 'adsorbate' status.
+        num_atoms: Total number of atoms.
 
     Returns:
-        Tuple[Atoms, List[int]]:
-            - The carved cluster atoms (PBC disabled, FixedAtoms applied).
-            - List mapping cluster indices to full system indices.
+        Array of indices belonging to the cluster.
     """
-    # 1. Extract Atoms in Cubic Box
-    if full_atoms.pbc.any():
-        vectors = full_atoms.get_distances(
-            center_idx, range(len(full_atoms)), mic=True, vector=True
-        )
-    else:
-        vectors = full_atoms.positions - full_atoms.positions[center_idx]
+    visited = np.zeros(num_atoms, dtype=np.bool_)
+    visited[start_node] = True
 
-    half_box = box_size / 2.0
+    # Pre-allocate queue (max size = num_atoms)
+    queue = np.empty(num_atoms, dtype=np.int32)
+    q_head = 0
+    q_tail = 0
 
-    # Mask for atoms inside the cubic box [-L/2, L/2]
-    mask = (np.abs(vectors) <= half_box).all(axis=1)
+    queue[q_tail] = start_node
+    q_tail += 1
 
-    # Get indices in full system
-    cluster_indices = np.where(mask)[0]
+    # List to store cluster members
+    # Numba doesn't support dynamic list append well in all versions,
+    # but we can use an array and a counter or a list if typed.
+    # Using an array for output is safer with nopython.
+    cluster_buffer = np.empty(num_atoms, dtype=np.int32)
+    cluster_count = 0
 
-    # Create cluster object
-    cluster = full_atoms[mask].copy()
+    cluster_buffer[cluster_count] = start_node
+    cluster_count += 1
 
-    # Center the cluster at (half_box, half_box, half_box)
-    cluster.positions = vectors[mask] + half_box
+    while q_head < q_tail:
+        current = queue[q_head]
+        q_head += 1
 
-    # Set box dimensions but disable PBC
-    cluster.set_cell([box_size, box_size, box_size])
-    cluster.set_pbc(False)
+        # Get neighbors from CSR structure
+        start_idx = indptr[current]
+        end_idx = indptr[current + 1]
 
-    # 2. Apply Fixed Boundary Condition
-    rel_pos = cluster.positions - np.array([half_box, half_box, half_box])
-    inner_limit = half_box - buffer_width
+        for k in range(start_idx, end_idx):
+            neighbor = indices[k]
 
-    fixed_mask = (np.abs(rel_pos) > inner_limit).any(axis=1)
-    fixed_indices = np.where(fixed_mask)[0]
+            if not visited[neighbor]:
+                # CRITICAL CHECK: Only traverse if neighbor is ALSO an adsorbate
+                if cns[neighbor] < cn_cutoff:
+                    visited[neighbor] = True
+                    queue[q_tail] = neighbor
+                    q_tail += 1
 
-    if len(fixed_indices) > 0:
-        cluster.set_constraint(FixAtoms(indices=fixed_indices))
+                    cluster_buffer[cluster_count] = neighbor
+                    cluster_count += 1
 
-    return cluster, cluster_indices.tolist()
-
-def _select_active_atoms(atoms: Atoms, params: KMCParams) -> List[int]:
-    """Select active atoms for KMC displacement based on strategy."""
-    indices = []
-
-    # 1. Surface selection
-    if "surface" in params.active_region_mode:
-        z_coords = atoms.positions[:, 2]
-        surface_indices = np.where(z_coords > params.active_z_cutoff)[0]
-    else:
-        surface_indices = np.arange(len(atoms))
-
-    # 2. Species selection
-    if "species" in params.active_region_mode:
-        symbols = np.array(atoms.get_chemical_symbols())
-        species_mask = np.isin(symbols, params.active_species)
-        species_indices = np.where(species_mask)[0]
-    else:
-        species_indices = np.arange(len(atoms))
-
-    # Intersection
-    active_indices = np.intersect1d(surface_indices, species_indices)
-
-    if len(active_indices) == 0:
-        return []
-
-    return active_indices.tolist()
-
-
-def _run_single_search(
-    initial_full_atoms: Atoms,
-    potential_path: str,
-    kmc_params: KMCParams,
-    al_params: ALParams,
-    seed: int
-) -> Union[KMCResult, Tuple[float, np.ndarray, List[int]]]:
-    """Run a single dimer search on a LOCAL CLUSTER.
-
-    Returns:
-        KMCResult if UNCERTAIN or FAILED.
-        Tuple[float, np.ndarray, List[int]] (barrier, displacement_vector, map) if SUCCESS.
-    """
-    np.random.seed(seed)
-
-    # 1. Select Target Atom
-    active_indices = _select_active_atoms(initial_full_atoms, kmc_params)
-    if not active_indices:
-        return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_full_atoms, metadata={"reason": "No active atoms found"})
-
-    if kmc_params.selection_bias == "coordination":
-        cutoff = 3.5
-        nl = NeighborList([cutoff/2]*len(initial_full_atoms), self_interaction=False, bothways=True)
-        nl.update(initial_full_atoms)
-        cns = np.array([len(nl.get_neighbors(i)[0]) for i in active_indices])
-        weights = (1.0 / (cns + 0.1)) ** kmc_params.bias_strength
-        probs = weights / np.sum(weights)
-        target_idx = np.random.choice(active_indices, p=probs)
-    else:
-        target_idx = np.random.choice(active_indices)
-
-    # 2. Carve Cluster
-    cluster_atoms, index_map = _carve_cluster(
-        initial_full_atoms,
-        target_idx,
-        kmc_params.box_size,
-        kmc_params.buffer_width
-    )
-
-    try:
-        cluster_target_idx = index_map.index(target_idx)
-    except ValueError:
-        return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_full_atoms, metadata={"reason": "Target atom lost in carving"})
-
-    # Setup calculator
-    _setup_calculator(cluster_atoms, potential_path)
-
-    # 3. Perturb
-    search_atoms = cluster_atoms.copy()
-    _setup_calculator(search_atoms, potential_path)
-
-    if kmc_params.move_type == "cluster":
-        dists = search_atoms.get_distances(cluster_target_idx, range(len(search_atoms)), mic=False)
-        local_cluster_indices = np.where(dists < kmc_params.cluster_radius)[0]
-
-        fixed_indices = set()
-        for c in search_atoms.constraints:
-            if isinstance(c, FixAtoms):
-                fixed_indices.update(c.index)
-
-        coherent_disp = np.random.normal(0, kmc_params.search_radius, 3)
-
-        for idx in local_cluster_indices:
-            if idx in fixed_indices:
-                continue
-            noise = np.random.normal(0, kmc_params.search_radius * 0.2, 3)
-            search_atoms.positions[idx] += coherent_disp + noise
-
-    else:
-        displacement = np.random.normal(0, kmc_params.search_radius, 3)
-        search_atoms.positions[cluster_target_idx] += displacement
-
-    # 4. Dimer Search
-    dimer_control = DimerControl(
-        logfile=None,
-        eigenmode_method='displacement',
-        f_rot_min=0.1,
-        f_rot_max=1.0
-    )
-    dimer_atoms = MinModeAtoms(search_atoms, dimer_control)
-    dimer_atoms.displace()
-
-    opt = FIRE(dimer_atoms, logfile=None)
-
-    converged = False
-    uncertain = False
-    max_steps = 1000
-    current_step = 0
-    max_gamma = 0.0
-
-    while current_step < max_steps:
-        opt.run(steps=kmc_params.check_interval)
-        current_step += kmc_params.check_interval
-
-        if opt.converged():
-            converged = True
-            break
-
-        try:
-            gamma_vals = search_atoms.calc.results.get('gamma')
-            if gamma_vals is None and hasattr(search_atoms.calc, 'get_property'):
-                 try:
-                     gamma_vals = search_atoms.calc.get_property('gamma', search_atoms)
-                 except:
-                     pass
-
-            if gamma_vals is not None:
-                max_gamma = np.max(gamma_vals)
-                if max_gamma > al_params.gamma_threshold:
-                    uncertain = True
-                    break
-        except Exception:
-            pass
-
-    if uncertain:
-        return KMCResult(
-            status=KMCStatus.UNCERTAIN,
-            structure=search_atoms,
-            metadata={"reason": "High Gamma in Saddle Search", "gamma": max_gamma}
-        )
-
-    if converged:
-        # Relax to product
-        product_atoms = search_atoms.copy()
-        _setup_calculator(product_atoms, potential_path)
-
-        prod_opt = FIRE(product_atoms, logfile=None)
-        prod_converged = False
-        prod_uncertain = False
-        p_step = 0
-
-        while p_step < max_steps:
-            prod_opt.run(steps=kmc_params.check_interval)
-            p_step += kmc_params.check_interval
-
-            if prod_opt.converged():
-                prod_converged = True
-                break
-
-            try:
-                g_vals = product_atoms.calc.results.get('gamma')
-                if g_vals is not None and np.max(g_vals) > al_params.gamma_threshold:
-                     prod_uncertain = True
-                     break
-            except:
-                pass
-
-        if prod_uncertain:
-             return KMCResult(
-                status=KMCStatus.UNCERTAIN,
-                structure=product_atoms,
-                metadata={"reason": "High Gamma in Product Relaxation"}
-             )
-
-        if prod_converged:
-            e_saddle = dimer_atoms.get_potential_energy()
-            e_initial = cluster_atoms.get_potential_energy()
-
-            barrier = e_saddle - e_initial
-
-            if barrier > 0.01:
-                # Calculate displacement vector
-                displacement = product_atoms.positions - cluster_atoms.positions
-                return (barrier, displacement, index_map)
-
-    return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_full_atoms)
+    return cluster_buffer[:cluster_count]
 
 
 class OffLatticeKMCEngine(KMCEngine):
-    """Off-Lattice KMC Engine with k-step uncertainty checking."""
+    """Off-Lattice KMC Engine with k-step uncertainty checking and Numba optimization."""
 
     def __init__(self, kmc_params: KMCParams, al_params: ALParams):
         """Initialize the KMC Engine.
@@ -303,68 +137,309 @@ class OffLatticeKMCEngine(KMCEngine):
         self.kmc_params = kmc_params
         self.al_params = al_params
 
-    def _setup_calculator(self, atoms: Atoms, potential_path: str):
-        """Attach the Pacemaker calculator to the atoms."""
-        _setup_calculator(atoms, potential_path)
+    def _identify_moving_cluster(
+        self,
+        atoms: Atoms,
+        center_idx: int,
+        indices: np.ndarray,
+        indptr: np.ndarray,
+        cns: np.ndarray
+    ) -> List[int]:
+        """Identify the connected cluster using Numba-optimized BFS."""
+
+        # Check center first
+        if cns[center_idx] >= self.kmc_params.adsorbate_cn_cutoff:
+             return [center_idx]
+
+        cluster_arr = _bfs_traversal_numba(
+            center_idx,
+            indices,
+            indptr,
+            cns,
+            self.kmc_params.adsorbate_cn_cutoff,
+            len(atoms)
+        )
+        return sorted(cluster_arr.tolist())
+
+    def _carve_cluster(
+        self,
+        full_atoms: Atoms,
+        moving_indices: List[int]
+    ) -> Tuple[Atoms, List[int]]:
+        """Carve a cubic cluster around the moving molecule and apply strict fixing."""
+        box_size = self.kmc_params.box_size
+
+        # 1. Calculate Geometric Center
+        cluster_pos = full_atoms.positions[moving_indices]
+        if full_atoms.pbc.any():
+            ref_pos = cluster_pos[0]
+            d = cluster_pos - ref_pos
+            cell = full_atoms.get_cell()
+            pbc = full_atoms.get_pbc()
+            for i in range(3):
+                if pbc[i]:
+                    l = cell[i, i]
+                    d[:, i] -= np.round(d[:, i] / l) * l
+            cluster_pos = ref_pos + d
+
+        center_pos = np.mean(cluster_pos, axis=0)
+
+        # 2. Extract Atoms
+        vectors = full_atoms.positions - center_pos
+
+        if full_atoms.pbc.any():
+            cell = full_atoms.get_cell()
+            inv_cell = np.linalg.inv(cell)
+            scaled = np.dot(vectors, inv_cell)
+            scaled -= np.round(scaled)
+            vectors = np.dot(scaled, cell)
+
+        half_box = box_size / 2.0
+        mask = (np.abs(vectors) <= half_box).all(axis=1)
+        mask[moving_indices] = True
+
+        cluster_indices = np.where(mask)[0]
+        cluster = full_atoms[mask].copy()
+
+        # 3. Center and Disable PBC
+        extracted_vectors = vectors[mask]
+        cluster.positions = extracted_vectors + half_box
+        cluster.set_cell([box_size, box_size, box_size])
+        cluster.set_pbc(False)
+
+        # 4. Strict Fixed Boundary
+        global_to_local = {global_idx: local_idx for local_idx, global_idx in enumerate(cluster_indices)}
+
+        indices_to_fix = []
+        for global_idx in cluster_indices:
+            if global_idx not in moving_indices:
+                indices_to_fix.append(global_to_local[global_idx])
+
+        if indices_to_fix:
+            cluster.set_constraint(FixAtoms(indices=indices_to_fix))
+
+        return cluster, cluster_indices.tolist()
+
+    def _run_single_search(
+        self,
+        full_atoms_snapshot: Atoms, # Passed as snapshot to worker? No, usually passed whole
+        # To avoid pickling large atoms object repeatedly, process pool usually shares memory on fork (Linux)
+        # But if using 'spawn', it copies.
+        # We assume 'fork' is default on Linux.
+        potential_path: str,
+        target_idx: int,
+        indices: np.ndarray,
+        indptr: np.ndarray,
+        cns: np.ndarray,
+        seed: int
+    ) -> Union[KMCResult, Tuple[float, np.ndarray, List[int]]]:
+        """Worker function for single search."""
+        np.random.seed(seed)
+
+        # 1. Identify Cluster
+        moving_indices = self._identify_moving_cluster(
+            full_atoms_snapshot, target_idx, indices, indptr, cns
+        )
+
+        # 2. Carve
+        cluster, index_map = self._carve_cluster(full_atoms_snapshot, moving_indices)
+
+        local_moving_indices = []
+        for i, global_idx in enumerate(index_map):
+            if global_idx in moving_indices:
+                local_moving_indices.append(i)
+
+        if not local_moving_indices:
+             return KMCResult(status=KMCStatus.NO_EVENT, structure=full_atoms_snapshot, metadata={"reason": "Carving Error"})
+
+        _setup_calculator(cluster, potential_path)
+
+        # 3. Perturb (Cooperative Move)
+        search_atoms = cluster.copy()
+        _setup_calculator(search_atoms, potential_path)
+
+        # Coherent displacement for the whole molecule
+        coherent_disp = np.random.normal(0, self.kmc_params.search_radius, 3)
+
+        for idx in local_moving_indices:
+            # Add coherent displacement + small thermal noise
+            noise = np.random.normal(0, self.kmc_params.search_radius * 0.2, 3)
+            search_atoms.positions[idx] += coherent_disp + noise
+
+        # 4. Dimer Search
+        dimer_control = DimerControl(
+            logfile=None,
+            eigenmode_method='displacement',
+            f_rot_min=0.1,
+            f_rot_max=1.0
+        )
+
+        dimer_atoms = MinModeAtoms(search_atoms, dimer_control)
+        dimer_atoms.displace()
+
+        opt = FIRE(dimer_atoms, logfile=None)
+
+        # FineTuna Logic
+        converged = False
+        uncertain = False
+        max_steps = 1000
+        current_step = 0
+        max_gamma = 0.0
+
+        while current_step < max_steps:
+            opt.run(steps=self.kmc_params.check_interval)
+            current_step += self.kmc_params.check_interval
+
+            if opt.converged():
+                converged = True
+                break
+
+            # Check Uncertainty
+            try:
+                calc = search_atoms.calc
+                gamma_vals = None
+                if hasattr(calc, "results"):
+                    gamma_vals = calc.results.get('gamma')
+                if gamma_vals is None and hasattr(calc, 'get_property'):
+                    try: gamma_vals = calc.get_property('gamma', search_atoms)
+                    except: pass
+
+                if gamma_vals is not None:
+                    max_gamma = np.max(gamma_vals)
+                    if max_gamma > self.al_params.gamma_threshold:
+                        uncertain = True
+                        break
+            except Exception:
+                pass
+
+        if uncertain:
+            return KMCResult(
+                status=KMCStatus.UNCERTAIN,
+                structure=search_atoms,
+                metadata={"reason": "High Gamma Saddle", "gamma": max_gamma}
+            )
+
+        if converged:
+            # Relax Product
+            product_atoms = search_atoms.copy()
+            _setup_calculator(product_atoms, potential_path)
+
+            prod_opt = FIRE(product_atoms, logfile=None)
+            prod_opt.run(fmax=self.kmc_params.dimer_fmax, steps=500)
+
+            # Check Product Uncertainty?
+            # (Optional but good practice)
+
+            e_saddle = dimer_atoms.get_potential_energy()
+            e_initial = cluster.get_potential_energy()
+            barrier = e_saddle - e_initial
+
+            if barrier > 0.01:
+                displacement = product_atoms.positions - cluster.positions
+                return (barrier, displacement, index_map)
+
+        return KMCResult(status=KMCStatus.NO_EVENT, structure=full_atoms_snapshot)
+
 
     def run_step(self, initial_atoms: Atoms, potential_path: str) -> KMCResult:
-        """Run a single KMC step: Saddle point search and event selection.
-        """
+        """Run a single KMC step."""
 
-        # Working copy for minimization (Full System)
         atoms = initial_atoms.copy()
-        self._setup_calculator(atoms, potential_path)
+        _setup_calculator(atoms, potential_path) # Attach for minimization
 
-        # 1. Minimize current basin (ensure we are at a minimum)
+        # Minimize Basin
         try:
             opt = FIRE(atoms, logfile=None)
             opt.run(fmax=self.kmc_params.dimer_fmax, steps=200)
-        except Exception as e:
-            logger.warning(f"Initial minimization failed: {e}")
+        except Exception:
+            pass
 
-        # Prepare for parallel execution
-        atoms.calc = None
+        atoms.calc = None # Detach for pickling/passing
 
-        found_events: List[Tuple[float, np.ndarray, List[int]]] = []
-        uncertain_results: List[KMCResult] = []
+        # 1. Build Connectivity & CNs (Once for Full System)
+        cutoff = self.kmc_params.cluster_connectivity_cutoff
+        nl = NeighborList(
+            [cutoff/2.0]*len(atoms),
+            self_interaction=False,
+            bothways=True,
+            skin=0.0
+        )
+        nl.update(atoms)
 
-        logger.info(f"Starting {self.kmc_params.n_searches} parallel KMC searches with {self.kmc_params.n_workers} workers.")
+        # Get CSR Matrix
+        # sparse=True returns a scipy.sparse.dok_matrix usually, convert to CSR
+        matrix = nl.get_connectivity_matrix(sparse=True)
+        csr_matrix = matrix.tocsr()
+        indices = csr_matrix.indices
+        indptr = csr_matrix.indptr
+
+        # Compute CNs
+        # Row counts in CSR
+        cns = np.diff(indptr)
+
+        # 2. Target Selection
+        # Filter: Surface & Species & Low CN
+        # Species
+        symbols = np.array(atoms.get_chemical_symbols())
+        species_mask = np.isin(symbols, self.kmc_params.active_species)
+
+        # Surface
+        z_coords = atoms.positions[:, 2]
+        surface_mask = z_coords > self.kmc_params.active_z_cutoff
+
+        # Low CN
+        cn_mask = cns < self.kmc_params.adsorbate_cn_cutoff
+
+        valid_mask = species_mask & surface_mask & cn_mask
+        candidate_indices = np.where(valid_mask)[0]
+
+        if len(candidate_indices) == 0:
+            logger.warning("No valid KMC candidates.")
+            return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_atoms)
+
+        # Select Unique Targets
+        n_select = min(self.kmc_params.n_searches, len(candidate_indices))
+        selected_targets = np.random.choice(candidate_indices, size=n_select, replace=False)
+
+        logger.info(f"Dispatching {n_select} parallel searches...")
+
+        # 3. Parallel Execution
+        found_events = []
+        uncertain_results = []
 
         with ProcessPoolExecutor(max_workers=self.kmc_params.n_workers) as executor:
             futures = []
-            for i in range(self.kmc_params.n_searches):
+            for target_idx in selected_targets:
                 seed = np.random.randint(0, 1000000)
-                futures.append(
-                    executor.submit(
-                        _run_single_search,
-                        atoms, # Full atoms
-                        potential_path,
-                        self.kmc_params,
-                        self.al_params,
-                        seed
-                    )
-                )
+                futures.append(executor.submit(
+                    self._run_single_search,
+                    atoms,
+                    potential_path,
+                    target_idx,
+                    indices,
+                    indptr,
+                    cns,
+                    seed
+                ))
 
             for future in as_completed(futures):
                 try:
-                    result = future.result()
-                    if isinstance(result, KMCResult):
-                        if result.status == KMCStatus.UNCERTAIN:
-                            uncertain_results.append(result)
-                    elif isinstance(result, tuple):
-                        # (barrier, displacement, index_map)
-                        found_events.append(result)
+                    res = future.result()
+                    if isinstance(res, KMCResult) and res.status == KMCStatus.UNCERTAIN:
+                        uncertain_results.append(res)
+                    elif isinstance(res, tuple):
+                        found_events.append(res)
                 except Exception as e:
-                    logger.error(f"KMC Search worker failed: {e}")
+                    logger.error(f"Worker failed: {e}")
 
+        # 4. Aggregation
         if uncertain_results:
-            logger.info(f"Collected {len(uncertain_results)} uncertain searches. Triggering AL.")
-            return uncertain_results[0]
+             return uncertain_results[0]
 
         if not found_events:
-            return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_atoms)
+             return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_atoms)
 
-        # Rate R_i = v * exp(-E_a / k_B T)
+        # Rate Calculation
         k_B = 8.617333262e-5
         T = self.kmc_params.temperature
         v = self.kmc_params.prefactor
@@ -380,31 +455,18 @@ class OffLatticeKMCEngine(KMCEngine):
 
         dt = -np.log(np.random.random()) / total_rate
         selected_idx = np.random.choice(len(rates), p=np.array(rates)/total_rate)
-        selected_event = found_events[selected_idx]
 
-        barrier, displacement, index_map = selected_event
+        barrier, displacement, index_map = found_events[selected_idx]
 
-        logger.info(f"KMC Event Selected: Barrier={barrier:.3f} eV, Time Step={dt:.3e} s")
-
-        final_full_structure = atoms.copy()
-
-        # Apply displacement
-        # index_map maps cluster_idx -> full_idx
-        # displacement is array of shape (n_cluster_atoms, 3)
-        full_indices = index_map
-        final_full_structure.positions[full_indices] += displacement
-
-        # Wrap? No, Fixed Boundary logic implies we didn't cross boundaries of the box.
-        # But we should wrap the full system if it's periodic?
-        # Standard to wrap.
-        if final_full_structure.pbc.any():
-            final_full_structure.wrap()
-
-        final_full_structure.calc = None
+        # Apply Event
+        final_atoms = atoms.copy()
+        final_atoms.positions[index_map] += displacement
+        if final_atoms.pbc.any():
+            final_atoms.wrap()
 
         return KMCResult(
             status=KMCStatus.SUCCESS,
-            structure=final_full_structure,
+            structure=final_atoms,
             time_step=dt,
-            metadata={"barrier": barrier, "rates": rates}
+            metadata={"barrier": barrier}
         )

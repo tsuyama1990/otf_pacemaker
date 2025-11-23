@@ -105,6 +105,10 @@ class KMCParams:
     selection_bias: str = "coordination"
     bias_strength: float = 2.0
 
+    # Graph Heuristics
+    adsorbate_cn_cutoff: int = 9
+    cluster_connectivity_cutoff: float = 3.0
+
 
 @dataclass
 class DFTParams:
