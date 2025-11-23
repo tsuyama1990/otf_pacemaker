@@ -93,7 +93,7 @@ def main():
     )
 
     runner = LAMMPSRunner(
-        cmd="lmp_serial",  # In production, this might come from env or config
+        cmd=config.md_params.lammps_command,
         input_generator=input_generator
     )
 
@@ -113,7 +113,7 @@ def main():
         r_core=config.al_params.r_core,
         box_size=config.al_params.box_size,
         stoichiometric_ratio=stoich_ratio,
-        lammps_cmd="lmp_serial",
+        lammps_cmd=config.md_params.lammps_command,
         min_bond_distance=config.al_params.min_bond_distance,
         stoichiometry_tolerance=config.al_params.stoichiometry_tolerance
     )

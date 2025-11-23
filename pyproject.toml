@@ -18,6 +18,9 @@ dependencies = [
     "pytest>=9.0.1",
     "pymatgen",
     "mp-api",
+    "torch",
+    "torchvision",
+    "torchaudio",
 ]
 
 [build-system]
@@ -41,3 +44,13 @@ target-version = ['py310']
 
 [tool.isort]
 profile = "black"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }

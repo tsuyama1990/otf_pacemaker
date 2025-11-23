@@ -7,14 +7,19 @@ echo "=============================================="
 
 # Check for uv
 if ! command -v uv &> /dev/null; then
-    echo "Error: 'uv' is not installed. Please install uv first."
-    echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
+    echo "'uv' is not installed. Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # Add uv to PATH for the current session
+    source $HOME/.cargo/env || export PATH="$HOME/.local/bin:$PATH"
 fi
 
-echo "Initializing Python environment with uv..."
-# Install dependencies defined in pyproject.toml
+echo "Initializing Python environment and installing dependencies..."
+# Use uv sync to create venv and install all dependencies including CUDA-enabled PyTorch
+# The pyproject.toml is configured to use the CUDA 12.1 index for torch, torchvision, and torchaudio.
 uv sync
+
+echo "Verifying PyTorch and CUDA installation..."
+uv run python check_gpu.py
 
 echo "Creating directory structure..."
 mkdir -p src tests data

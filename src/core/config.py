@@ -63,6 +63,7 @@ class MDParams:
     masses: dict[str, float]
     restart_freq: int = 1000
     dump_freq: int = 1000
+    lammps_command: str = "lmp_serial"
 
 
 @dataclass

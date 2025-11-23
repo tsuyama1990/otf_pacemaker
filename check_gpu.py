@@ -10,6 +10,12 @@ def check_gpu():
     
     print(f"Python Version: {sys.version}")
     print(f"PyTorch Version: {torch.__version__}")
+    try:
+        import torchvision
+        print(f"Torchvision Version: {torchvision.__version__}")
+    except ImportError:
+        print("Torchvision Version: Not Installed")
+        
     print(f"OS: {platform.system()} {platform.release()}")
     
     is_cuda_available = torch.cuda.is_available()
