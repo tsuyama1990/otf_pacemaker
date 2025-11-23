@@ -5,43 +5,55 @@ It uses Python's standard dataclasses for definition and PyYAML for loading from
 """
 
 import yaml
+import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, List, Dict
-from ase.data import covalent_radii, atomic_numbers
+from ase.data import atomic_numbers, covalent_radii  # REQUIRED for physics-based defaults
 
 
-def generate_default_lj_params(elements: List[str]) -> "LJParams":
-    """Generates default Lennard-Jones parameters based on input elements.
-
-    Calculates sigma based on the average covalent radius of the input elements.
-    Epsilon is set to 1.0 eV (stiff wall) and cutoff is set to 2.5 * sigma.
-
-    Args:
-        elements: List of chemical symbols.
-
-    Returns:
-        LJParams: Generated LJ parameters.
+def generate_default_lj_params(elements: List[str]) -> Dict[str, float]:
     """
-    radii = [covalent_radii[atomic_numbers[el]] for el in elements]
-    r_avg = sum(radii) / len(radii)
-    sigma = 2 * r_avg * (2 ** (-1 / 6))
-    return LJParams(epsilon=1.0, sigma=sigma, cutoff=2.5 * sigma)
+    Generates robust default Lennard-Jones parameters based on element physics.
+
+    Physics:
+        - Sigma: Derived from the sum of covalent radii to place the repulsive wall correctly.
+                 sigma = (2 * r_avg) * 2^(-1/6)
+        - Epsilon: Defaults to 1.0 eV (Strong Repulsion) to ensure MD stability.
+        - Cutoff: Defaults to 2.5 * sigma.
+    """
+    if not elements:
+        # Fallback safety defaults
+        return {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+
+    try:
+        radii = []
+        for el in elements:
+            z = atomic_numbers.get(el)
+            if z is None:
+                raise ValueError(f"Unknown element symbol: {el}")
+            radii.append(covalent_radii[z])
+
+        avg_radius = np.mean(radii)
+
+        # r_min = 2^(1/6) * sigma
+        # We want r_min roughly at the sum of radii (2 * avg_radius)
+        # Therefore: sigma = (2 * r_avg) / 1.122
+        sigma = (2.0 * avg_radius) * 0.8909
+
+        return {
+            "epsilon": 1.0,  # Hard stability wall
+            "sigma": float(round(sigma, 3)),
+            "cutoff": float(round(2.5 * sigma, 3))
+        }
+    except Exception as e:
+        print(f"Warning: Could not auto-generate LJ params ({e}). Using safe defaults.")
+        return {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
 
 
 @dataclass
 class MDParams:
-    """Parameters for Molecular Dynamics simulations.
-
-    Attributes:
-        timestep: Time step in femtoseconds.
-        temperature: Simulation temperature in Kelvin.
-        pressure: Simulation pressure in bars.
-        n_steps: Number of MD steps to run.
-        restart_freq: Frequency of saving restart files.
-        dump_freq: Frequency of dumping trajectory frames. Recommended to be a divisor of restart_freq for synchronization.
-    """
-
+    """Parameters for Molecular Dynamics simulations."""
     timestep: float
     temperature: float
     pressure: float
@@ -55,23 +67,7 @@ class MDParams:
 
 @dataclass
 class ALParams:
-    """Parameters for Active Learning strategy.
-
-    Attributes:
-        gamma_threshold: Uncertainty threshold for stopping the simulation.
-        n_clusters: Number of clusters to extract.
-        r_core: Radius for the core region where forces are fully weighted (and fixed during relaxation).
-        box_size: Size of the cubic small cell (Angstroms).
-        initial_potential: Path to the initial potential file.
-        potential_yaml_path: Path to the potential configuration file (basis set definition).
-        initial_dataset_path: Path to the initial dataset (e.g. from Phase 1) to generate the first Active Set.
-        initial_active_set_path: Path to an existing Active Set file (.asi). Optional.
-        stoichiometry_tolerance: Tolerance for stoichiometry check (default 0.1).
-        min_bond_distance: Minimum bond distance for overlap removal (default 1.5).
-        num_parallel_labeling: Number of parallel processes for labeling (default 4).
-        query_strategy: Strategy for querying new data ("uncertainty" or "k_step_force").
-    """
-
+    """Parameters for Active Learning strategy."""
     gamma_threshold: float
     n_clusters: int
     r_core: float
@@ -88,18 +84,7 @@ class ALParams:
 
 @dataclass
 class KMCParams:
-    """Parameters for kMC simulations (Transition State Search).
-
-    Attributes:
-        active: Whether to enable kMC phase.
-        temperature: Simulation temperature in Kelvin for rate estimation.
-        n_searches: Number of dimer searches to perform per kMC step.
-        search_radius: Radius for random displacement in dimer search (Angstroms).
-        dimer_fmax: Force convergence criterion for dimer optimization.
-        check_interval: Number of steps between uncertainty checks during optimization (k-step).
-        prefactor: Prefactor for Arrhenius rate equation.
-    """
-
+    """Parameters for kMC simulations."""
     active: bool = False
     temperature: float = 300.0
     n_searches: int = 10
@@ -107,39 +92,23 @@ class KMCParams:
     dimer_fmax: float = 0.05
     check_interval: int = 5
     prefactor: float = 1e12
-
-    # Local Cluster Params
     box_size: float = 12.0
     buffer_width: float = 2.0
-
-    # Scaling & Parallelization
     n_workers: int = 4
     active_region_mode: str = "surface_and_species"
     active_species: List[str] = field(default_factory=lambda: ["Co", "Ti", "O"])
     active_z_cutoff: float = 10.0
-
-    # Search Heuristics
     move_type: str = "cluster"
     cluster_radius: float = 3.0
     selection_bias: str = "coordination"
     bias_strength: float = 2.0
-
-    # Graph Heuristics
     adsorbate_cn_cutoff: int = 9
     cluster_connectivity_cutoff: float = 3.0
 
 
 @dataclass
 class DFTParams:
-    """Parameters for Density Functional Theory calculations.
-
-    Attributes:
-        ecutwfc: Kinetic energy cutoff for wavefunctions in Ry.
-        kpts: k-points mesh grid (e.g., [2, 2, 2]).
-        pseudo_dir: Directory containing pseudopotentials.
-        command: Command to execute the DFT code (e.g., 'mpirun -np 4 pw.x -in PREFIX.pwi > PREFIX.pwo').
-    """
-
+    """Parameters for Density Functional Theory calculations."""
     ecutwfc: float
     kpts: tuple[int, int, int]
     pseudo_dir: str
@@ -148,14 +117,7 @@ class DFTParams:
 
 @dataclass
 class LJParams:
-    """Parameters for Lennard-Jones potential.
-
-    Attributes:
-        epsilon: Depth of the potential well.
-        sigma: Finite distance at which the inter-particle potential is zero.
-        cutoff: Cutoff distance for the potential.
-    """
-
+    """Parameters for Lennard-Jones potential."""
     epsilon: float
     sigma: float
     cutoff: float
@@ -163,15 +125,7 @@ class LJParams:
 
 @dataclass
 class PreOptimizationParams:
-    """Parameters for MACE pre-optimization.
-
-    Attributes:
-        enabled: Whether to enable pre-optimization.
-        model: MACE model size ("small", "medium", "large").
-        fmax: Force convergence criterion.
-        steps: Maximum number of optimization steps.
-        device: Device to run MACE on.
-    """
+    """Parameters for MACE pre-optimization."""
     enabled: bool = False
     model: str = "medium"
     fmax: float = 0.1
@@ -181,29 +135,14 @@ class PreOptimizationParams:
 
 @dataclass
 class GenerationParams:
-    """Parameters for scenario-driven generation.
-
-    Attributes:
-        pre_optimization: Settings for MACE pre-optimization.
-        scenarios: List of scenario configurations.
-    """
+    """Parameters for scenario-driven generation."""
     pre_optimization: PreOptimizationParams = field(default_factory=PreOptimizationParams)
     scenarios: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
 class Config:
-    """Main configuration class aggregating all parameter sections.
-
-    Attributes:
-        md_params: Molecular Dynamics parameters.
-        al_params: Active Learning parameters.
-        kmc_params: kMC parameters.
-        dft_params: DFT calculation parameters.
-        lj_params: Lennard-Jones potential parameters.
-        generation_params: Generation and pre-optimization parameters.
-    """
-
+    """Main configuration class aggregating all parameter sections."""
     md_params: MDParams
     al_params: ALParams
     dft_params: DFTParams
@@ -213,14 +152,7 @@ class Config:
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "Config":
-        """Create a Config instance from a dictionary.
-
-        Args:
-            config_dict: Dictionary containing configuration data.
-
-        Returns:
-            Config: An initialized Config object.
-        """
+        """Create a Config instance from a dictionary with auto-LJ generation."""
         gen_dict = config_dict.get("generation", {})
         pre_opt_dict = gen_dict.get("pre_optimization", {})
 
@@ -229,43 +161,31 @@ class Config:
             scenarios=gen_dict.get("scenarios", [])
         )
 
+        # Extract MD Params first to get elements
         md_dict = config_dict.get("md_params", {})
-        lj_dict = config_dict.get("lj_params")
 
-        if lj_dict:
-            lj_params = LJParams(**lj_dict)
-        else:
-            elements = md_dict.get("elements")
-            if elements:
-                lj_params = generate_default_lj_params(elements)
-            else:
-                # This will raise the missing arguments error for LJParams,
-                # or let MDParams raise missing 'elements' error.
-                lj_params = LJParams(**{})
+        # --- AUTOMATED LJ LOGIC ---
+        lj_dict = config_dict.get("lj_params", {})
+
+        if not lj_dict:
+            # Retrieve elements from md_params (CRITICAL STEP)
+            elements = md_dict.get("elements", [])
+            # Generate defaults
+            lj_dict = generate_default_lj_params(elements)
+        # --------------------------
 
         return cls(
             md_params=MDParams(**md_dict),
             al_params=ALParams(**config_dict.get("al_params", {})),
             kmc_params=KMCParams(**config_dict.get("kmc_params", {})),
             dft_params=DFTParams(**config_dict.get("dft_params", {})),
-            lj_params=lj_params,
+            lj_params=LJParams(**lj_dict),
             generation_params=generation_params
         )
 
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Config":
-        """Load configuration from a YAML file.
-
-        Args:
-            config_path: Path to the YAML configuration file.
-
-        Returns:
-            Config: An initialized Config object.
-
-        Raises:
-            FileNotFoundError: If the config file does not exist.
-            yaml.YAMLError: If the file contains invalid YAML.
-        """
+        """Load configuration from a YAML file."""
         path = Path(config_path)
         with path.open("r", encoding="utf-8") as f:
             config_dict = yaml.safe_load(f)
