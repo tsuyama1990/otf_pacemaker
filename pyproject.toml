@@ -12,6 +12,9 @@ dependencies = [
     "scipy",
     "lammps",
     "PyYAML",
+    "mace-torch",
+    "pyxtal",
+    "scikit-learn",
 ]
 
 [build-system]
