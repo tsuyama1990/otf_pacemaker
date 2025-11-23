@@ -35,7 +35,7 @@ class CovalentGenerator(BaseGenerator):
         """
         Inserts atoms into interstitial sites (Voronoi voids).
         """
-        from pymatgen.analysis.defects.generators import InterstitialGenerator
+        # from pymatgen.analysis.defects.generators import InterstitialGenerator
 
         # This is expensive, use simple Voronoi finding or just random placement
         # The user requested "Interstitials... high energy state"

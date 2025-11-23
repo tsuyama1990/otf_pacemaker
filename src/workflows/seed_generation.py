@@ -18,9 +18,10 @@ from typing import List
 from ase import Atoms
 from ase.calculators.espresso import Espresso, EspressoProfile
 
-from src.config import Config
-from src.labeler import DeltaLabeler, ShiftedLennardJones
-from src.trainer import PacemakerTrainer
+from src.core.config import Config
+from src.labeling.strategies.delta_labeler import DeltaLabeler
+from src.labeling.calculators.shifted_lj import ShiftedLennardJones
+from src.training.strategies.pacemaker import PacemakerTrainer
 from src.generation.candidate import RandomStructureGenerator
 from src.generation.filter import MACEFilter
 from src.generation.sampler import DirectSampler

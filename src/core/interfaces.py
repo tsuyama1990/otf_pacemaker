@@ -7,7 +7,7 @@ of the active learning loop, enabling dependency inversion and easier testing.
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple, Any
 from ase import Atoms
-from src.enums import SimulationState
+from src.core.enums import SimulationState
 
 
 class MDEngine(ABC):

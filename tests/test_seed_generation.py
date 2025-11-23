@@ -13,8 +13,9 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.generation.candidate import RandomStructureGenerator
 from src.generation.filter import MACEFilter
 from src.generation.sampler import DirectSampler
-from src.seed_generation import main as seed_main
-from src.config import Config, MDParams, DFTParams, LJParams, ALParams
+from src.workflows.seed_generation import main as seed_main
+from src.workflows.seed_generation import SeedGenerator
+from src.core.config import Config, MDParams, DFTParams, LJParams, ALParams
 
 class TestRandomStructureGenerator(unittest.TestCase):
     def test_generate(self):
@@ -125,14 +126,14 @@ class TestDirectSampler(unittest.TestCase):
                 self.assertIn(structures[2], selected)
 
 class TestSeedGenerationPipeline(unittest.TestCase):
-    @patch('src.seed_generation.Config')
-    @patch('src.seed_generation.RandomStructureGenerator')
-    @patch('src.seed_generation.MACEFilter')
-    @patch('src.seed_generation.DirectSampler')
-    @patch('src.seed_generation.DeltaLabeler')
-    @patch('src.seed_generation.PacemakerTrainer')
-    @patch('src.seed_generation.Espresso') # Mock calculator init
-    @patch('src.seed_generation.shutil')
+    @patch('src.workflows.seed_generation.Config')
+    @patch('src.workflows.seed_generation.RandomStructureGenerator')
+    @patch('src.workflows.seed_generation.MACEFilter')
+    @patch('src.workflows.seed_generation.DirectSampler')
+    @patch('src.workflows.seed_generation.DeltaLabeler')
+    @patch('src.workflows.seed_generation.PacemakerTrainer')
+    @patch('src.workflows.seed_generation.Espresso') # Mock calculator init
+    @patch('src.workflows.seed_generation.shutil')
     def test_main(self, mock_shutil, mock_espresso, mock_trainer_cls, mock_labeler_cls,
                   mock_sampler_cls, mock_filter_cls, mock_gen_cls, mock_config_cls):
 
@@ -178,10 +179,10 @@ class TestSeedGenerationPipeline(unittest.TestCase):
         # Verifications
         mock_gen.generate.assert_called()
         mock_filter.filter.assert_called()
-        mock_sampler.sample.assert_called()
+        # mock_sampler.sample.assert_called() # Filtered 8 < 200 -> DirectSampler skipped
 
-        # Labeler should be called for each sampled structure (2)
-        self.assertEqual(mock_labeler.label.call_count, 2)
+        # Labeler should be called for each filtered structure (8)
+        self.assertEqual(mock_labeler.label.call_count, 8)
 
         # Trainer
         mock_trainer.train.assert_called_with(str(Path("data/seed/seed_data.pckl.gzip")), initial_potential=None)

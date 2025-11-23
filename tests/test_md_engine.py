@@ -2,8 +2,9 @@ import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pytest
-from src.md_engine import LAMMPSRunner, LAMMPSInputGenerator
-from src.enums import SimulationState
+from src.engines.lammps.runner import LAMMPSRunner
+from src.engines.lammps.input_generator import LAMMPSInputGenerator
+from src.core.enums import SimulationState
 
 def test_lammps_input_generation(tmp_path):
     original_cwd = os.getcwd()

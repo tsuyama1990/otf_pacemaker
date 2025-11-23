@@ -4,11 +4,11 @@ from pathlib import Path
 from ase import Atoms
 import numpy as np
 
-from src.active_learning import MaxVolSampler
-from src.orchestrator import ActiveLearningOrchestrator
-from src.config import Config, MDParams, ALParams, DFTParams, LJParams
-from src.enums import SimulationState
-from src.interfaces import MDEngine, StructureGenerator, Labeler, Trainer
+from src.sampling.strategies.max_vol import MaxVolSampler
+from src.workflows.orchestrator import ActiveLearningOrchestrator
+from src.core.config import Config, MDParams, ALParams, DFTParams, LJParams
+from src.core.enums import SimulationState
+from src.core.interfaces import MDEngine, StructureGenerator, Labeler, Trainer
 
 @pytest.fixture
 def mock_atoms():
@@ -25,9 +25,9 @@ def test_max_vol_sampler_missing_kwargs(max_vol_sampler):
     with pytest.raises(ValueError):
         max_vol_sampler.sample(dump_file="dump.lammpstrj")
 
-@patch('src.active_learning.read')
-@patch('src.active_learning.write')
-@patch('src.active_learning.subprocess.run')
+@patch('src.sampling.strategies.max_vol.read')
+@patch('src.sampling.strategies.max_vol.write')
+@patch('src.sampling.strategies.max_vol.subprocess.run')
 def test_max_vol_sampler_success(mock_run, mock_write, mock_read, max_vol_sampler, mock_atoms, tmp_path):
     # Setup mocks
     mock_read.side_effect = [
@@ -36,7 +36,7 @@ def test_max_vol_sampler_success(mock_run, mock_write, mock_read, max_vol_sample
     ]
 
     # Mock file existence checks
-    with patch('src.active_learning.Path.exists', return_value=True):
+    with patch('src.sampling.strategies.max_vol.Path.exists', return_value=True):
          samples = max_vol_sampler.sample(
              dump_file="dump.lammpstrj",
              potential_yaml_path="potential.yaml",
@@ -59,10 +59,10 @@ def test_max_vol_sampler_success(mock_run, mock_write, mock_read, max_vol_sample
     assert "-a" in cmd_list
     assert "-m" in cmd_list
 
-@patch('src.orchestrator.os.chdir')
-@patch('src.orchestrator.Path.mkdir')
-@patch('src.orchestrator.Path.exists')
-@patch('src.orchestrator.read')
+@patch('src.workflows.orchestrator.os.chdir')
+@patch('src.workflows.orchestrator.Path.mkdir')
+@patch('src.workflows.orchestrator.Path.exists')
+@patch('src.workflows.orchestrator.read')
 def test_orchestrator_initial_asi_generation(mock_read, mock_exists, mock_mkdir, mock_chdir):
     # Setup Config
     config = Config(

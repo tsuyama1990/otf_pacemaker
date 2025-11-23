@@ -14,9 +14,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from ase.io import read
 from ase import Atoms
 
-from src.interfaces import MDEngine, Sampler, StructureGenerator, Labeler, Trainer
-from src.enums import SimulationState
-from src.config import Config
+from src.core.interfaces import MDEngine, Sampler, StructureGenerator, Labeler, Trainer
+from src.core.enums import SimulationState
+from src.core.config import Config
 from src.utils.logger import CSVLogger
 
 logger = logging.getLogger(__name__)
