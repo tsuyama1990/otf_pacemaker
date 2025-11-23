@@ -6,16 +6,48 @@ coordinating the interaction between MD engine, sampler, generator, labeler, and
 
 import os
 import logging
+import tempfile
+import shutil
 from pathlib import Path
 from typing import Optional, List
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from ase.io import read
 from ase import Atoms
 
 from src.interfaces import MDEngine, Sampler, StructureGenerator, Labeler, Trainer
 from src.enums import SimulationState
 from src.config import Config
+from src.utils.logger import CSVLogger
 
 logger = logging.getLogger(__name__)
+
+
+def _run_labeling_task(labeler: Labeler, structure: Atoms) -> Optional[Atoms]:
+    """Helper function to run labeling in a temporary directory to avoid conflicts.
+
+    This function is intended to be run in a separate process.
+    """
+    # Create a temporary directory for this task
+    # We use mkdtemp to ensure we have a unique directory
+    tmpdir = tempfile.mkdtemp(prefix="label_task_")
+    original_cwd = os.getcwd()
+
+    try:
+        os.chdir(tmpdir)
+        # Run labeling
+        # Note: If labeler uses relative paths for resources (like pseudopotentials),
+        # they must have been resolved to absolute paths before passing here.
+        return labeler.label(structure)
+    except Exception as e:
+        logger.error(f"Labeling task failed in {tmpdir}: {e}")
+        return None
+    finally:
+        os.chdir(original_cwd)
+        # Clean up temporary directory
+        try:
+            shutil.rmtree(tmpdir)
+        except Exception as e:
+            logger.warning(f"Failed to cleanup temp dir {tmpdir}: {e}")
 
 
 class ActiveLearningOrchestrator:
@@ -29,6 +61,7 @@ class ActiveLearningOrchestrator:
         generator: StructureGenerator,
         labeler: Labeler,
         trainer: Trainer,
+        csv_logger: Optional[CSVLogger] = None
     ):
         """Initialize the orchestrator.
 
@@ -39,6 +72,7 @@ class ActiveLearningOrchestrator:
             generator: Structure Generator instance.
             labeler: Labeler instance.
             trainer: Trainer instance.
+            csv_logger: CSV Logger instance for metrics.
         """
         self.config = config
         self.md_engine = md_engine
@@ -46,6 +80,41 @@ class ActiveLearningOrchestrator:
         self.generator = generator
         self.labeler = labeler
         self.trainer = trainer
+        self.csv_logger = csv_logger or CSVLogger()
+        self.max_workers = config.al_params.num_parallel_labeling
+
+    def _label_clusters_parallel(self, clusters: List[Atoms]) -> List[Atoms]:
+        """Label clusters in parallel using ProcessPoolExecutor.
+
+        Args:
+            clusters: List of atomic structures to label.
+
+        Returns:
+            List[Atoms]: List of successfully labeled structures.
+        """
+        labeled_results = []
+
+        # We need to make sure 'self.labeler' is safe to pickle.
+        # The Labeler (DeltaLabeler) contains calculator objects.
+        # ASE calculators should be picklable, but if they have open files it might fail.
+        # Espresso calculator is generally picklable.
+
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_cluster = {
+                executor.submit(_run_labeling_task, self.labeler, c): c
+                for c in clusters
+            }
+
+            for future in as_completed(future_to_cluster):
+                cluster_in = future_to_cluster[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        labeled_results.append(result)
+                except Exception as e:
+                    logger.error(f"Parallel labeling execution failed for a cluster: {e}")
+
+        return labeled_results
 
     def run(self):
         """Executes the active learning loop."""
@@ -68,16 +137,6 @@ class ActiveLearningOrchestrator:
         if not current_asi and initial_dataset_path:
              logger.info("No initial Active Set provided. Generating from initial dataset...")
              try:
-                 # We can use the Trainer to update the active set (generate initial one)
-                 # We need to temporarily be in a writable dir or handle absolute paths carefully.
-                 # Let's do it in 'data/seed' if it exists or just in root?
-                 # Trainer.update_active_set outputs to 'potential.asi' in current dir.
-                 # Let's generate it in 'data/seed' if we can or just assume one exists.
-                 # Actually, let's assume Phase 1 is done and we can check 'data/seed/potential.asi'
-                 # But if config didn't specify it, we generate it.
-
-                 # Let's create a temporary working dir for initialization or just do it in the first iteration dir?
-                 # Better to do it once.
                  init_dir = original_cwd / "data" / "seed"
                  init_dir.mkdir(parents=True, exist_ok=True)
                  os.chdir(init_dir)
@@ -101,6 +160,12 @@ class ActiveLearningOrchestrator:
             work_dir.mkdir(parents=True, exist_ok=True)
 
             logger.info(f"--- Starting Iteration {iteration} ---")
+
+            # Metrics for this iteration
+            iter_max_gamma = 0.0
+            iter_n_added = 0
+            iter_active_set_size = 0
+            iter_rmse_train = None # Not easily available from here yet without parsing logs
 
             try:
                 os.chdir(work_dir)
@@ -132,6 +197,10 @@ class ActiveLearningOrchestrator:
 
                 logger.info(f"MD Finished with state: {state}")
 
+                # Check for max gamma if available in logs or dump (simplified)
+                # MD engine might not return max gamma directly, but we can try to extract it from dump later
+                # For now, we get it during sampling.
+
                 if state == SimulationState.COMPLETED:
                     logger.info("Simulation completed successfully.")
                     break
@@ -147,16 +216,13 @@ class ActiveLearningOrchestrator:
                         raise FileNotFoundError("Dump file not found.")
 
                     # Sample
-                    # We pass all necessary info via kwargs to support MaxVolSampler
-                    # Note: We need to pass 'atoms' for MaxGammaSampler (legacy)
-                    # and 'dump_file'/'potential_yaml'/'asi_path' for MaxVolSampler.
-
-                    # For compatibility, we can read the last frame for MaxGammaSampler
-                    # But if we use MaxVolSampler, we prefer it to handle the file.
-                    # Since we don't know which sampler we have (polymorphism), we prepare everything.
-
                     last_frame = read(dump_file, index=-1, format="lammps-dump-text")
                     self._ensure_chemical_symbols(last_frame)
+
+                    # Try to estimate max gamma from the last frame for logging
+                    if 'f_f_gamma' in last_frame.arrays:
+                         import numpy as np
+                         iter_max_gamma = np.max(last_frame.arrays['f_f_gamma'])
 
                     sample_kwargs = {
                         "atoms": last_frame,
@@ -167,27 +233,22 @@ class ActiveLearningOrchestrator:
                         "elements": self.config.md_params.elements
                     }
 
-                    # Sampler returns List[Tuple[Atoms, int]]
                     selected_samples = self.sampler.sample(**sample_kwargs)
 
-                    labeled_clusters = []
-                    logger.info(f"Generating and labeling {len(selected_samples)} small cells...")
+                    logger.info(f"Generating {len(selected_samples)} small cells...")
 
+                    clusters_to_label = []
                     for atoms, center_id in selected_samples:
-                        try:
-                            # Generate Small Cell
-                            cell = self.generator.generate_cell(atoms, center_id, str(abs_potential_path))
+                         try:
+                             cell = self.generator.generate_cell(atoms, center_id, str(abs_potential_path))
+                             clusters_to_label.append(cell)
+                         except Exception as e:
+                             logger.warning(f"Generation failed for cluster {center_id}: {e}")
 
-                            # Label
-                            labeled_cluster = self.labeler.label(cell)
-                            if labeled_cluster is None:
-                                logger.warning(f"Labeling failed for cluster {center_id}. Skipping.")
-                                continue
+                    logger.info(f"Labeling {len(clusters_to_label)} clusters in parallel...")
+                    labeled_clusters = self._label_clusters_parallel(clusters_to_label)
 
-                            labeled_clusters.append(labeled_cluster)
-                        except Exception as e:
-                            logger.warning(f"Processing failed for cluster {center_id}: {e}. Skipping.")
-                            continue
+                    iter_n_added = len(labeled_clusters)
 
                     if not labeled_clusters:
                         logger.error("No clusters labeled successfully. Aborting active learning loop.")
@@ -198,7 +259,6 @@ class ActiveLearningOrchestrator:
                     dataset_path = self.trainer.prepare_dataset(labeled_clusters)
 
                     # Train and update Active Set
-                    # Note: we pass potential_yaml_path so trainer can update active set
                     new_potential = self.trainer.train(
                         dataset_path=dataset_path,
                         initial_potential=str(abs_potential_path),
@@ -208,17 +268,28 @@ class ActiveLearningOrchestrator:
 
                     current_potential = str(Path(new_potential).resolve())
 
-                    # If Trainer updated the active set, we should ideally get the new path.
-                    # Currently trainer.train returns only potential path.
-                    # However, Trainer stores the active set in 'potential.asi' in the working dir.
-                    # So we should update 'current_asi' to point to this new file.
+                    # Update current ASI path
                     new_asi_path = work_dir / "potential.asi"
                     if new_asi_path.exists():
                         current_asi = str(new_asi_path.resolve())
+                        # Estimate active set size (number of lines in ASI usually)
+                        with open(new_asi_path, 'r') as f:
+                             iter_active_set_size = sum(1 for line in f)
+
                         logger.info(f"Updating current active set path to: {current_asi}")
 
                     is_restart = True
                     logger.info(f"New potential trained: {current_potential}")
+
+                    # Log metrics
+                    self.csv_logger.log_metrics(
+                        iteration=iteration,
+                        max_gamma=iter_max_gamma,
+                        n_added=iter_n_added,
+                        active_set_size=iter_active_set_size,
+                        rmse_energy=None, # RMSE not captured from Trainer yet
+                        rmse_forces=None
+                    )
 
             except Exception as e:
                 logger.exception(f"An error occurred in iteration {iteration}: {e}")

@@ -6,7 +6,7 @@ This module sets up the configuration and dependencies, then orchestrates the ac
 import logging
 import sys
 from pathlib import Path
-from ase.calculators.espresso import Espresso
+from ase.calculators.espresso import Espresso, EspressoProfile
 
 from src.active_learning import MaxGammaSampler, SmallCellGenerator
 from src.config import Config
@@ -14,6 +14,8 @@ from src.labeler import DeltaLabeler, ShiftedLennardJones
 from src.md_engine import LAMMPSRunner, LAMMPSInputGenerator
 from src.trainer import PacemakerTrainer
 from src.orchestrator import ActiveLearningOrchestrator
+from src.seed_generation import SeedGenerator
+from src.utils.logger import CSVLogger
 
 # Setup logging
 logging.basicConfig(
@@ -34,7 +36,39 @@ def main():
 
     config = Config.from_yaml(config_path)
 
-    # 2. Initialize Components
+    # 2. Check Phase 1 Requirement
+    initial_pot_path = Path(config.al_params.initial_potential)
+    if not initial_pot_path.exists():
+        logger.info(f"Initial potential not found at {initial_pot_path}. Starting Phase 1: Seed Generation.")
+        try:
+            seed_gen = SeedGenerator(config)
+            seed_gen.run()
+
+            # After Seed Gen, we assume the potential is created at config.al_params.initial_potential
+            # Note: SeedGenerator writes to 'data/seed/seed_potential.yace'.
+            # We need to make sure config points to that or we move it?
+            # Or we just assume the user configured initial_potential to point to where seed gen puts it.
+
+            # If the configured path is different from where SeedGenerator put it, we might have an issue.
+            # SeedGenerator hardcodes output to 'data/seed/seed_potential.yace'.
+            generated_pot = Path("data/seed/seed_potential.yace")
+
+            if not generated_pot.exists():
+                logger.error("Seed generation finished but potential file is missing.")
+                sys.exit(1)
+
+            if generated_pot.resolve() != initial_pot_path.resolve():
+                logger.info(f"Copying generated potential to configured path: {initial_pot_path}")
+                import shutil
+                shutil.copy(generated_pot, initial_pot_path)
+
+        except Exception as e:
+            logger.exception(f"Phase 1 failed: {e}")
+            sys.exit(1)
+    else:
+        logger.info("Initial potential found. Skipping Phase 1.")
+
+    # 3. Initialize Components for Phase 2
 
     # MD Engine
     input_generator = LAMMPSInputGenerator(
@@ -76,10 +110,14 @@ def main():
 
     # Labeler
     # Setup QE Calculator (Reference)
+    # Ensure pseudo_dir is absolute
+    pseudo_dir_abs = str(Path(config.dft_params.pseudo_dir).resolve())
+
     qe_input_data = {
         "control": {
-            "pseudo_dir": config.dft_params.pseudo_dir,
+            "pseudo_dir": pseudo_dir_abs,
             "calculation": "scf",
+            "disk_io": "none", # Optimization for speed/parallelism
         },
         "system": {
             "ecutwfc": config.dft_params.ecutwfc,
@@ -89,11 +127,17 @@ def main():
         }
     }
 
-    qe_calculator = Espresso(
+    # Correctly instantiate EspressoProfile for ASE 3.26.0
+    profile = EspressoProfile(
         command=config.dft_params.command,
+        pseudo_dir=pseudo_dir_abs
+    )
+
+    qe_calculator = Espresso(
+        profile=profile,
         input_data=qe_input_data,
         kpts=config.dft_params.kpts,
-        pseudo_dir=config.dft_params.pseudo_dir
+        pseudo_dir=pseudo_dir_abs # Kept for compatibility if needed
     )
 
     # Setup LJ Calculator (Baseline)
@@ -112,17 +156,22 @@ def main():
     # Trainer
     trainer = PacemakerTrainer()
 
-    # 3. Initialize Orchestrator
+    # Logger
+    csv_logger = CSVLogger()
+
+    # 4. Initialize Orchestrator
     orchestrator = ActiveLearningOrchestrator(
         config=config,
         md_engine=runner,
         sampler=sampler,
         generator=generator,
         labeler=labeler,
-        trainer=trainer
+        trainer=trainer,
+        csv_logger=csv_logger
     )
 
-    # 4. Run
+    # 5. Run Phase 2
+    logger.info("Starting Phase 2: Active Learning Loop.")
     orchestrator.run()
 
 
