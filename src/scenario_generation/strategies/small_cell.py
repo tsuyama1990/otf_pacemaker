@@ -7,6 +7,8 @@ from ase import Atoms
 from ase.constraints import ExpCellFilter, FixAtoms
 from ase.optimize import FIRE
 
+from src.utils.structure import carve_cubic_cluster
+
 # Try importing LAMMPS calculator
 try:
     from ase.calculators.lammpsrun import LAMMPS
@@ -61,23 +63,17 @@ class SmallCellGenerator(StructureGenerator):
             Atoms: The relaxed small periodic cell.
         """
         # 1. Rectangle Extraction (Cubic Box)
+        center_pos = large_atoms.positions[center_id]
 
-        if large_atoms.pbc.any():
-            vectors = large_atoms.get_distances(
-                center_id, range(len(large_atoms)), mic=True, vector=True
-            )
-        else:
-            vectors = large_atoms.positions - large_atoms.positions[center_id]
+        subset_atoms, _ = carve_cubic_cluster(
+            atoms=large_atoms,
+            center_pos=center_pos,
+            box_size=self.box_size,
+            buffer_width=None,
+            apply_pbc=True
+        )
 
         half_box = self.box_size / 2.0
-        mask = (np.abs(vectors) <= half_box).all(axis=1)
-
-        subset_atoms = large_atoms[mask].copy()
-        subset_atoms.positions = vectors[mask] + half_box
-
-        subset_atoms.set_cell([self.box_size, self.box_size, self.box_size])
-        subset_atoms.set_pbc(True)
-        subset_atoms.wrap()
 
         # 1.1. Overlap Removal
         self._remove_overlaps(subset_atoms, center_pos=np.array([half_box, half_box, half_box]))

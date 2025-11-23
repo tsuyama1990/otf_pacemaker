@@ -24,6 +24,7 @@ except ImportError:
 from src.core.interfaces import KMCEngine, KMCResult
 from src.core.enums import KMCStatus
 from src.core.config import KMCParams, ALParams
+from src.utils.structure import carve_cubic_cluster
 
 logger = logging.getLogger(__name__)
 
@@ -41,58 +42,6 @@ def _setup_calculator(atoms: Atoms, potential_path: str):
     # We assume potential_path is a .yace or .yaml file
     calc = PyACECalculator(potential_path)
     atoms.calc = calc
-
-def _carve_cluster(full_atoms: Atoms, center_idx: int, box_size: float, buffer_width: float) -> Tuple[Atoms, List[int]]:
-    """Carve a cubic cluster around the target atom and apply fixed boundaries.
-
-    Args:
-        full_atoms: The full system structure (PBC enabled).
-        center_idx: Index of the center atom.
-        box_size: Side length of the cubic box (Angstroms).
-        buffer_width: Width of the outer fixed shell.
-
-    Returns:
-        Tuple[Atoms, List[int]]:
-            - The carved cluster atoms (PBC disabled, FixedAtoms applied).
-            - List mapping cluster indices to full system indices.
-    """
-    # 1. Extract Atoms in Cubic Box
-    if full_atoms.pbc.any():
-        vectors = full_atoms.get_distances(
-            center_idx, range(len(full_atoms)), mic=True, vector=True
-        )
-    else:
-        vectors = full_atoms.positions - full_atoms.positions[center_idx]
-
-    half_box = box_size / 2.0
-
-    # Mask for atoms inside the cubic box [-L/2, L/2]
-    mask = (np.abs(vectors) <= half_box).all(axis=1)
-
-    # Get indices in full system
-    cluster_indices = np.where(mask)[0]
-
-    # Create cluster object
-    cluster = full_atoms[mask].copy()
-
-    # Center the cluster at (half_box, half_box, half_box)
-    cluster.positions = vectors[mask] + half_box
-
-    # Set box dimensions but disable PBC
-    cluster.set_cell([box_size, box_size, box_size])
-    cluster.set_pbc(False)
-
-    # 2. Apply Fixed Boundary Condition
-    rel_pos = cluster.positions - np.array([half_box, half_box, half_box])
-    inner_limit = half_box - buffer_width
-
-    fixed_mask = (np.abs(rel_pos) > inner_limit).any(axis=1)
-    fixed_indices = np.where(fixed_mask)[0]
-
-    if len(fixed_indices) > 0:
-        cluster.set_constraint(FixAtoms(indices=fixed_indices))
-
-    return cluster, cluster_indices.tolist()
 
 def _select_active_atoms(atoms: Atoms, params: KMCParams) -> List[int]:
     """Select active atoms for KMC displacement based on strategy."""
@@ -154,12 +103,15 @@ def _run_single_search(
         target_idx = np.random.choice(active_indices)
 
     # 2. Carve Cluster
-    cluster_atoms, index_map = _carve_cluster(
-        initial_full_atoms,
-        target_idx,
-        kmc_params.box_size,
-        kmc_params.buffer_width
+    center_pos = initial_full_atoms.positions[target_idx]
+    cluster_atoms, index_array = carve_cubic_cluster(
+        atoms=initial_full_atoms,
+        center_pos=center_pos,
+        box_size=kmc_params.box_size,
+        buffer_width=kmc_params.buffer_width,
+        apply_pbc=False
     )
+    index_map = index_array.tolist()
 
     try:
         cluster_target_idx = index_map.index(target_idx)
