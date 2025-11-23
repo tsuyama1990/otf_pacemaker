@@ -15,6 +15,7 @@ dependencies = [
     "mace-torch",
     "pyxtal",
     "scikit-learn",
+    "pytest>=9.0.1",
 ]
 
 [build-system]
