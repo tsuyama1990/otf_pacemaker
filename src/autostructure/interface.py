@@ -67,9 +67,8 @@ class InterfaceBuilder(BaseGenerator):
         scale_y = a_lengths[1] / by
 
         # --- SAFETY VALVE START ---
-        # Limit strain to 15% to avoid physical nonsense
         if abs(scale_x - 1.0) > 0.15 or abs(scale_y - 1.0) > 0.15:
-            # logger.warning(f"Skipping epitaxial stack: Strain too high ({scale_x:.2f}, {scale_y:.2f})")
+            # Strain > 15% is unphysical for training data initialization
             return
         # --- SAFETY VALVE END ---
 
@@ -154,6 +153,7 @@ class InterfaceBuilder(BaseGenerator):
 
             # --- SAFETY VALVE START ---
             if abs(scale_x - 1.0) > 0.15 or abs(scale_y - 1.0) > 0.15:
+                # Strain > 15% is unphysical for training data initialization
                 return
             # --- SAFETY VALVE END ---
 
