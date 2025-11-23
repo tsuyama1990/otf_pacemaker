@@ -89,6 +89,10 @@ class KMCParams:
     check_interval: int = 5
     prefactor: float = 1e12
 
+    # Local Cluster Params
+    box_size: float = 12.0
+    buffer_width: float = 2.0
+
     # Scaling & Parallelization
     n_workers: int = 4
     active_region_mode: str = "surface_and_species"

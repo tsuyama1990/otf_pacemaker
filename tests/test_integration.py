@@ -140,6 +140,7 @@ class TestIntegrationPhase3(unittest.TestCase):
         # Setup mocks for dependencies
         config = Config.from_yaml(self.config_path)
         mock_md = MagicMock()
+        mock_kmc = MagicMock()
         mock_sampler = MagicMock()
         mock_generator = MagicMock()
         mock_labeler = MagicMock()
@@ -150,7 +151,7 @@ class TestIntegrationPhase3(unittest.TestCase):
         mock_labeler.label.return_value = atoms
 
         orchestrator = ActiveLearningOrchestrator(
-            config, mock_md, mock_sampler, mock_generator, mock_labeler, mock_trainer
+            config, mock_md, mock_kmc, mock_sampler, mock_generator, mock_labeler, mock_trainer
         )
 
         # Create a list of clusters
