@@ -20,6 +20,12 @@ from src.training.strategies.pacemaker import PacemakerTrainer
 from src.workflows.orchestrator import ActiveLearningOrchestrator
 from src.workflows.seed_generation import SeedGenerator
 from src.utils.logger import CSVLogger
+from src.utils.sssp_loader import (
+    load_sssp_database,
+    calculate_cutoffs,
+    get_pseudopotentials_dict,
+    validate_pseudopotentials
+)
 
 # Setup logging
 logging.basicConfig(
@@ -119,22 +125,43 @@ def main():
     )
 
     # Labeler
-    # Setup QE Calculator (Reference)
-    # Ensure pseudo_dir is absolute
+    # Setup QE Calculator (Reference) using SSSP
+    logger.info(f"Loading SSSP database from {config.dft_params.sssp_json_path}")
+    sssp_db = load_sssp_database(config.dft_params.sssp_json_path)
+    
+    # Get elements
+    elements = config.md_params.elements
+    
+    # Validate pseudopotentials
     pseudo_dir_abs = str(Path(config.dft_params.pseudo_dir).resolve())
+    validate_pseudopotentials(pseudo_dir_abs, elements, sssp_db)
+    
+    # Get pseudopotential filenames and cutoffs from SSSP
+    pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
+    ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
+    logger.info(f"Using SSSP cutoffs: ecutwfc={ecutwfc} Ry, ecutrho={ecutrho} Ry")
+    
+    # Note: In Phase 2, structures come from MD which may have varying cell sizes
+    # We'll use a reasonable default k-point grid here, but ideally should
+    # calculate per-structure. For now, use a conservative grid.
+    # TODO: Implement dynamic k-point calculation in the labeling loop
+    default_kpts = (3, 3, 3)  # Conservative for potentially large MD cells
+    logger.warning(
+        f"Using default k-points {default_kpts} for Phase 2. "
+        "Consider implementing per-structure k-point calculation."
+    )
 
     qe_input_data = {
         "control": {
             "pseudo_dir": pseudo_dir_abs,
             "calculation": "scf",
-            "disk_io": "none", # Optimization for speed/parallelism
+            "disk_io": "none",
         },
         "system": {
-            "ecutwfc": config.dft_params.ecutwfc,
+            "ecutwfc": ecutwfc,
+            "ecutrho": ecutrho,
         },
-        "electrons": {
-            "k_points": config.dft_params.kpts
-        }
+        "electrons": {}
     }
 
     # Correctly instantiate EspressoProfile for ASE 3.26.0
@@ -145,9 +172,11 @@ def main():
 
     qe_calculator = Espresso(
         profile=profile,
+        pseudopotentials=pseudopotentials,
         input_data=qe_input_data,
-        kpts=config.dft_params.kpts,
-        pseudo_dir=pseudo_dir_abs # Kept for compatibility if needed
+        kpts=default_kpts,
+        koffset=(1, 1, 1),
+        pseudo_dir=pseudo_dir_abs
     )
 
     # Setup LJ Calculator (Baseline)

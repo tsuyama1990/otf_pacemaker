@@ -23,7 +23,7 @@ class MACEFilter:
     def __init__(
         self,
         model_size: str = "medium",
-        device: str = "cpu",
+        device: str = None,
         energy_cutoff_per_atom: float = 0.0,
         force_cutoff: float = 100.0 # e.g. eV/A
     ):
@@ -31,7 +31,7 @@ class MACEFilter:
 
         Args:
             model_size: Size of the MACE model ("small", "medium", "large").
-            device: Device to run the model on ("cpu", "cuda").
+            device: Device to run the model on ("cpu", "cuda"). If None, auto-detects GPU.
             energy_cutoff_per_atom: Threshold for energy per atom (deprecated logic usually, checking for physical validity).
                                     Actually, high positive energy usually means bad structure.
                                     However, raw energy depends on reference.
@@ -39,6 +39,14 @@ class MACEFilter:
             force_cutoff: Maximum allowed force component (or norm) on any atom.
                           Structures with forces higher than this are likely unphysical overlaps.
         """
+        # Auto-detect device if not specified
+        if device is None:
+            try:
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                device = "cpu"
+        
         self.model_size = model_size
         self.device = device
         self.energy_cutoff_per_atom = energy_cutoff_per_atom

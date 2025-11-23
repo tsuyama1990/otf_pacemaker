@@ -27,6 +27,13 @@ from src.scenario_generation.filter import MACEFilter
 from src.scenario_generation.sampler import DirectSampler
 from src.scenario_generation.scenarios import ScenarioFactory
 from src.scenario_generation.optimizer import FoundationOptimizer
+from src.utils.sssp_loader import (
+    load_sssp_database,
+    calculate_cutoffs,
+    get_pseudopotentials_dict,
+    calculate_kpoints,
+    validate_pseudopotentials
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -109,7 +116,11 @@ class SeedGenerator:
         all_candidates = random_candidates + scenario_candidates
 
         # Ideally, we filter all to remove unphysical ones, even from scenarios.
-        mace_filter = MACEFilter(model_size="medium", force_cutoff=20.0)
+        mace_filter = MACEFilter(
+            model_size="medium", 
+            force_cutoff=20.0,
+            device=gen_params.device
+        )
         filtered_structures = mace_filter.filter(all_candidates)
 
         if not filtered_structures:
@@ -135,33 +146,50 @@ class SeedGenerator:
         # 4. Labeling
         logger.info("Phase 1.4: DFT Labeling")
 
-        # Resolve pseudo_dir to absolute path because Labeler might change directory
+        # Load SSSP database
+        logger.info(f"Loading SSSP database from {self.config.dft_params.sssp_json_path}")
+        sssp_db = load_sssp_database(self.config.dft_params.sssp_json_path)
+        
+        # Get elements from structures
+        elements = self.config.md_params.elements
+        
+        # Validate pseudopotentials exist
         pseudo_dir = Path(self.config.dft_params.pseudo_dir).resolve()
-
-        pseudopotentials = {el: f"{el}.UPF" for el in self.config.md_params.elements}
-
+        validate_pseudopotentials(str(pseudo_dir), elements, sssp_db)
+        
+        # Get pseudopotential filenames from SSSP
+        pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
+        
+        # Calculate cutoffs from SSSP (max across all elements)
+        ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
+        logger.info(f"Using SSSP cutoffs: ecutwfc={ecutwfc} Ry, ecutrho={ecutrho} Ry")
+        
+        # Note: k-points will be calculated per-structure in the labeling loop
+        # since they depend on cell size
+        
         # Correctly instantiate EspressoProfile for ASE 3.26.0
-        # Signature: (command, pseudo_dir, **kwargs)
         profile = EspressoProfile(
             command=self.config.dft_params.command,
             pseudo_dir=str(pseudo_dir)
         )
 
-        dft_calc = Espresso(
-            profile=profile,
-            pseudopotentials=pseudopotentials,
-            pseudo_dir=str(pseudo_dir), # Redundant if in profile? But often kept for compatibility
-            tstress=True,
-            tprnfor=True,
-            kpts=self.config.dft_params.kpts,
-            ecutwfc=self.config.dft_params.ecutwfc,
-            input_data={
+        # Create a template calculator (k-points will be set per structure)
+        dft_calc_template = {
+            'profile': profile,
+            'pseudopotentials': pseudopotentials,
+            'pseudo_dir': str(pseudo_dir),
+            'tstress': True,
+            'tprnfor': True,
+            'ecutwfc': ecutwfc,
+            'ecutrho': ecutrho,
+            'input_data': {
                 'control': {
                     'calculation': 'scf',
                     'disk_io': 'none',
                 },
                 'system': {
-                    'ecutwfc': self.config.dft_params.ecutwfc,
+                    'ecutwfc': ecutwfc,
+                    'ecutrho': ecutrho,
                     'occupations': 'smearing',
                     'smearing': 'mv',
                     'degauss': 0.02,
@@ -170,7 +198,7 @@ class SeedGenerator:
                     'mixing_beta': 0.7,
                 }
             }
-        )
+        }
 
         lj_calc = ShiftedLennardJones(
             epsilon=self.config.lj_params.epsilon,
@@ -178,11 +206,38 @@ class SeedGenerator:
             rc=self.config.lj_params.cutoff
         )
 
+        # Create initial DFT calculator (will be updated per-structure in the loop)
+        # Use a conservative default k-grid for initialization
+        initial_kpts = (3, 3, 3)
+        dft_calc = Espresso(
+            kpts=initial_kpts,
+            koffset=(1, 1, 1),
+            **dft_calc_template
+        )
+
         labeler = DeltaLabeler(reference_calculator=dft_calc, baseline_calculator=lj_calc)
 
         labeled_structures = []
         for i, atoms in enumerate(selected_structures):
             logger.info(f"Labeling structure {i+1}/{len(selected_structures)}")
+            
+            # Calculate k-points based on this structure's cell size
+            kpts, kpts_shift = calculate_kpoints(
+                atoms.cell,
+                kpoint_density=self.config.dft_params.kpoint_density
+            )
+            logger.info(f"Structure {i+1}: k-points={kpts}, shift={kpts_shift}")
+            
+            # Create calculator with structure-specific k-points
+            dft_calc = Espresso(
+                kpts=kpts,
+                koffset=kpts_shift,
+                **dft_calc_template
+            )
+            
+            # Update labeler's reference calculator
+            labeler.reference_calculator = dft_calc
+            
             labeled = labeler.label(atoms)
             if labeled is not None:
                 labeled_structures.append(labeled)

@@ -21,11 +21,21 @@ al_params:
   potential_yaml_path: "data/potential.yaml"
   stoichiometry_tolerance: 0.1
   min_bond_distance: 2.0
-  num_parallel_labeling: 4
+  num_parallel_labeling: 6  # Run 6 DFT jobs in parallel (6 × 4 cores = 24 cores total)
   query_strategy: "uncertainty"
 
 dft_params:
-  ecutwfc: 40.0
-  kpts: [2, 2, 2]
-  pseudo_dir: "/path/to/pseudos"
-  command: "pw.x"
+  sssp_json_path: "/home/tomo/qe_calc/pp_precision/SSSP_1.3.0_PBE_precision.json"
+  pseudo_dir: "/home/tomo/qe_calc/pp_precision"
+  command: "/opt/intel/oneapi/mpi/2021.13/bin/mpirun -np 10 /home/tomo/pkgs/qe-7.3.1/bin/pw.x"
+  kpoint_density: 60  # Å, for high precision k-point grid (SSSP standard)
+
+generation:
+  device: "cuda"  # Device for MACE filtering (cuda/cpu)
+  pre_optimization:
+    enabled: false
+    model: "medium"
+    fmax: 0.1
+    steps: 50
+    device: "cuda"
+  scenarios: []

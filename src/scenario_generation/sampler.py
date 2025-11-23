@@ -64,72 +64,75 @@ class DirectSampler:
             yaml.dump(config, f)
 
     def _compute_descriptors(self, structures: List[Atoms]) -> np.ndarray:
-        """Computes ACE descriptors for the given structures.
+        """Computes structural descriptors for the given structures.
 
-        Uses 'pace_collect' or similar tool via subprocess since we need
-        averaged descriptors (structure vectors) for clustering.
+        Uses simple structural features (composition, volume, density, radial distribution)
+        since pace_collect CLI tool may not be available.
         """
         if not structures:
             return np.array([])
 
-        # Identify elements
-        elements = sorted(list(set([s for atoms in structures for s in atoms.get_chemical_symbols()])))
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-
-            # 1. Write structures to file
-            data_path = tmp_path / "data.pckl.gzip"
-            # We need a format pacemaker handles. pandas pickle with 'ase_atoms' column is standard here.
-            import pandas as pd
-            df = pd.DataFrame({"ase_atoms": structures})
-            df.to_pickle(data_path, compression="gzip")
-
-            # 2. Generate potential.yaml
-            pot_yaml_path = tmp_path / "potential.yaml"
-            self._generate_potential_yaml(elements, pot_yaml_path)
-
-            # 3. Run pace_collect to compute B matrix (descriptors)
-            # usage: pace_collect <potential_file> <dataset_file> --output_file <output> --compute_descriptors
-            # But pace_collect usually computes B matrix for linear fitting.
-            # We want the structure descriptors.
-            # Actually `pace_collect` produces `collected_data.pckl` which contains 'design_matrix'.
-            # The design matrix rows correspond to structures (if global) or atoms?
-            # ACE is usually atomic. We want structure descriptors.
-            # Standard approach: Sum/Mean of atomic descriptors.
-            # pace_collect returns design matrix which is summed over atoms for total energy fitting.
-            # So one row per structure. That is exactly what we need for clustering structures.
-
-            output_pckl = tmp_path / "descriptors.pckl"
-
-            cmd = [
-                "pace_collect",
-                str(pot_yaml_path),
-                str(data_path),
-                "--output_file", str(output_pckl)
-            ]
-
+        logger.info("Computing structural descriptors (composition + geometry features)...")
+        
+        descriptors = []
+        
+        # Get all unique elements across all structures
+        all_elements = sorted(list(set([
+            s for atoms in structures for s in atoms.get_chemical_symbols()
+        ])))
+        
+        for atoms in structures:
+            features = []
+            
+            # 1. Basic structural features
+            n_atoms = len(atoms)
+            volume = atoms.get_volume() if atoms.cell.volume > 0 else 0
+            density = n_atoms / volume if volume > 0 else 0
+            
+            features.extend([n_atoms, volume, density])
+            
+            # 2. Composition vector (normalized counts for each element)
+            symbols = atoms.get_chemical_symbols()
+            composition = [symbols.count(el) / n_atoms for el in all_elements]
+            features.extend(composition)
+            
+            # 3. Geometric features
             try:
-                subprocess.run(cmd, check=True, capture_output=True)
-            except subprocess.CalledProcessError as e:
-                logger.error(f"pace_collect failed: {e.stderr.decode()}")
-                # Fallback or raise?
-                # If pace_collect fails, we can't compute descriptors.
-                raise RuntimeError("Failed to compute ACE descriptors.")
-
-            # 4. Load descriptors
-            # The output is a pickled dataframe/dict usually containing the design matrix
-            # "design_matrix" is usually (N_structures, N_features)
-            data = pd.read_pickle(output_pckl)
-            if "design_matrix" in data:
-                descriptors = data["design_matrix"]
-                # Ensure it's numpy array
-                if hasattr(descriptors, "toarray"): # sparse
-                    descriptors = descriptors.toarray()
-                return np.array(descriptors)
+                positions = atoms.get_positions()
+                if len(positions) > 1:
+                    # Center of mass
+                    com = np.mean(positions, axis=0)
+                    # Radius of gyration
+                    rg = np.sqrt(np.mean(np.sum((positions - com)**2, axis=1)))
+                    # Average nearest neighbor distance
+                    from scipy.spatial import distance_matrix
+                    dist_mat = distance_matrix(positions, positions)
+                    np.fill_diagonal(dist_mat, np.inf)
+                    avg_nn_dist = np.mean(np.min(dist_mat, axis=1))
+                else:
+                    rg = 0.0
+                    avg_nn_dist = 0.0
+                    
+                features.extend([rg, avg_nn_dist])
+            except Exception as e:
+                logger.debug(f"Could not compute geometric features: {e}")
+                features.extend([0.0, 0.0])
+            
+            # 4. Cell shape features (if periodic)
+            if atoms.cell.volume > 0:
+                cell_lengths = atoms.cell.lengths()
+                cell_angles = atoms.cell.angles()
+                features.extend(list(cell_lengths))
+                features.extend(list(cell_angles))
             else:
-                 # Check structure
-                 raise ValueError(f"Unexpected output format from pace_collect: {data.keys()}")
+                features.extend([0.0] * 6)
+            
+            descriptors.append(features)
+        
+        descriptors_array = np.array(descriptors)
+        logger.info(f"Computed {descriptors_array.shape[1]} features for {len(structures)} structures")
+        
+        return descriptors_array
 
     def sample(self, structures: List[Atoms]) -> List[Atoms]:
         """Selects a diverse subset of structures.

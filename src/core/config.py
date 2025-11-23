@@ -110,10 +110,10 @@ class KMCParams:
 @dataclass
 class DFTParams:
     """Parameters for Density Functional Theory calculations."""
-    ecutwfc: float
-    kpts: tuple[int, int, int]
+    sssp_json_path: str  # Path to SSSP JSON database
     pseudo_dir: str
     command: str
+    kpoint_density: float = 60.0  # Å, for k-point grid calculation (high precision)
 
 
 @dataclass
@@ -139,6 +139,7 @@ class GenerationParams:
     """Parameters for scenario-driven generation."""
     pre_optimization: PreOptimizationParams = field(default_factory=PreOptimizationParams)
     scenarios: List[Dict[str, Any]] = field(default_factory=list)
+    device: str = "cuda"  # Device for MACE filtering (cuda/cpu)
 
 
 @dataclass

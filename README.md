@@ -60,6 +60,7 @@ cmake ../cmake \
 
 # Build
 make -j$(nproc)
+make install
 
 # Install or Set Library Path
 export LD_LIBRARY_PATH=$PWD:$LD_LIBRARY_PATH
@@ -149,6 +150,88 @@ The core workflow is orchestrated by `ActiveLearningOrchestrator` in `src/workfl
     -   `data/seed/`: Initial training data and potential.
     -   `data/iteration_X/`: Data for each AL cycle (MD dumps, trained potentials, logs).
     -   `training_log.csv`: Metrics (RMSE, Gamma, Active Set Size).
+
+---
+
+---
+
+## SSSP Pseudopotential Setup
+
+This project uses the **SSSP (Standard Solid State Pseudopotentials)** database for automatic pseudopotential selection and DFT parameter configuration.
+
+### 1. Download SSSP Pseudopotentials
+
+Download the SSSP precision library:
+
+```bash
+# Create directory for pseudopotentials
+mkdir -p ~/qe_calc/pp_precision
+cd ~/qe_calc/pp_precision
+
+# Download SSSP 1.3.0 PBE precision library
+wget https://archive.materialscloud.org/record/file?filename=SSSP_1.3.0_PBE_precision.tar.gz&record_id=1677
+tar -xzf SSSP_1.3.0_PBE_precision.tar.gz
+```
+
+The JSON metadata file (`SSSP_1.3.0_PBE_precision.json`) contains:
+- Pseudopotential filenames for each element
+- MD5 checksums for validation
+- Recommended cutoff energies (`ecutwfc`, `ecutrho`)
+- Pseudopotential type (NC/US/PAW)
+
+### 2. Configure SSSP in config.yaml
+
+```yaml
+dft_params:
+  sssp_json_path: "/home/tomo/qe_calc/pp_precision/SSSP_1.3.0_PBE_precision.json"
+  pseudo_dir: "/home/tomo/qe_calc/pp_precision"
+  command: "mpirun -np 4 pw.x"
+  kpoint_density: 60  # Å, for high precision (SSSP standard)
+```
+
+### 3. Automatic Features
+
+#### Pseudopotential Selection
+- Automatically loads correct PP files for each element from SSSP database
+- For compounds (e.g., Al-Cu), uses `max(ecutwfc)` and `max(ecutrho)` across all elements
+- Validates PP files exist and optionally checks MD5 checksums
+
+#### K-point Density Calculation
+Uses the **k-point density approach** instead of fixed grids:
+
+**Formula**: `L × N ≈ kpoint_density` (default: 60 Å for high precision)
+
+Where:
+- `L` = cell lattice vector length
+- `N` = number of k-points along that direction
+
+**Examples**:
+| Cell Size | Calculation | K-grid |
+|-----------|-------------|--------|
+| 3 Å (primitive) | 60/3 = 20 | 20×20×20 |
+| 10 Å (supercell) | 60/10 = 6 | 6×6×6 |
+| 20 Å (large cell) | 60/20 = 3 | 3×3×3 |
+
+**Benefits**:
+- Consistent accuracy across different cell sizes
+- Automatic adaptation for unit cells and supercells
+- Standard approach for MLIP dataset generation
+
+**K-point Settings**:
+- Grid type: Monkhorst-Pack
+- Shift: [1, 1, 1] (includes Γ-point)
+- Calculated per-structure based on cell dimensions
+
+### 4. Adjusting K-point Density
+
+Modify `kpoint_density` in `config.yaml` based on your accuracy needs:
+
+```yaml
+dft_params:
+  kpoint_density: 40   # Lower precision, faster (efficiency mode)
+  kpoint_density: 60   # High precision (SSSP standard, recommended)
+  kpoint_density: 80   # Very high precision (convergence tests)
+```
 
 ---
 
