@@ -13,6 +13,7 @@ from typing import Optional, List
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from ase.io import read, write
 from ase import Atoms
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 from src.core.interfaces import MDEngine, KMCEngine, Sampler, StructureGenerator, Labeler, Trainer
 from src.core.enums import SimulationState, KMCStatus
@@ -330,8 +331,15 @@ class ActiveLearningOrchestrator:
                         # But we should preserve velocities? KMC is diffusiion, velocities are thermalized.
                         # So we can just start fresh MD with random velocities (temp)
 
+                        # Thermalize velocities for the new basin
+                        MaxwellBoltzmannDistribution(
+                            kmc_result.structure,
+                            temperature_K=self.config.md_params.temperature
+                        )
+
                         next_input_file = work_dir / "kmc_output.data"
-                        write(next_input_file, kmc_result.structure, format="lammps-data")
+                        # Ensure velocities are written to the data file
+                        write(next_input_file, kmc_result.structure, format="lammps-data", velocities=True)
 
                         # Update state for next loop
                         current_structure = str(next_input_file.resolve())

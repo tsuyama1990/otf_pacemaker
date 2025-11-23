@@ -89,6 +89,18 @@ class KMCParams:
     check_interval: int = 5
     prefactor: float = 1e12
 
+    # Scaling & Parallelization
+    n_workers: int = 4
+    active_region_mode: str = "surface_and_species"
+    active_species: List[str] = field(default_factory=lambda: ["Co", "Ti", "O"])
+    active_z_cutoff: float = 10.0
+
+    # Search Heuristics
+    move_type: str = "cluster"
+    cluster_radius: float = 3.0
+    selection_bias: str = "coordination"
+    bias_strength: float = 2.0
+
 
 @dataclass
 class DFTParams:
