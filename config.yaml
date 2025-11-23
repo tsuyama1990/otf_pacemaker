@@ -1,0 +1,31 @@
+md_params:
+  timestep: 0.001
+  temperature: 300.0
+  pressure: 0.0
+  n_steps: 10000
+  elements: ["Al", "Cu"]
+  initial_structure: "data/initial.xyz"
+  masses:
+    Al: 26.98
+    Cu: 63.55
+  restart_freq: 1000
+  dump_freq: 1000
+  lammps_command: "/home/tomo/project/otf_pacemaker/mylammps/build/lmp"
+
+al_params:
+  gamma_threshold: 0.1
+  n_clusters: 5
+  r_core: 4.5
+  box_size: 10.0
+  initial_potential: "data/seed/seed_potential.yace"
+  potential_yaml_path: "data/potential.yaml"
+  stoichiometry_tolerance: 0.1
+  min_bond_distance: 2.0
+  num_parallel_labeling: 4
+  query_strategy: "uncertainty"
+
+dft_params:
+  ecutwfc: 40.0
+  kpts: [2, 2, 2]
+  pseudo_dir: "/path/to/pseudos"
+  command: "pw.x"
