@@ -49,6 +49,7 @@ class ALParams:
         initial_active_set_path: Path to an existing Active Set file (.asi). Optional.
         stoichiometry_tolerance: Tolerance for stoichiometry check (default 0.1).
         min_bond_distance: Minimum bond distance for overlap removal (default 1.5).
+        num_parallel_labeling: Number of parallel processes for labeling (default 4).
     """
 
     gamma_threshold: float
@@ -61,6 +62,7 @@ class ALParams:
     initial_active_set_path: Optional[str] = None
     stoichiometry_tolerance: float = 0.1
     min_bond_distance: float = 1.5
+    num_parallel_labeling: int = 4
 
 
 @dataclass
