@@ -1,5 +1,6 @@
 import numpy as np
 from ase import Atoms
+from ase.calculators.calculator import Calculator
 from ase.calculators.emt import EMT
 from ase.calculators.lj import LennardJones
 from ase.optimize import BFGS
@@ -9,6 +10,11 @@ class PreOptimizer:
     """
     Safety valve to perform geometric sanity checks and basic relaxation
     before expensive DFT calculations.
+
+    NOTE: Default behavior uses ase.optimize.BFGS, which performs Fixed-Cell relaxation
+    (only atomic positions are relaxed, lattice vectors remain constant).
+    Strategies like MolecularGenerator's 'high_pressure_packing' rely on this behavior
+    to maintain compressed cell volumes while relaxing atomic overlaps.
     """
 
     def __init__(self, fmax=0.1, steps=200, mic_distance=0.8):
@@ -36,22 +42,25 @@ class PreOptimizer:
 
         epsilon = 0.1 # Weak interaction
 
-        # Determine average sigma for the system or per-pair?
-        # ASE LennardJones is a simple pair potential. It takes sigma/epsilon as scalars
-        # (applying to all pairs) or we can use the 'rc' argument effectively.
-        # However, standard ASE LJ assumes single sigma/epsilon for the whole system.
-        # For mixed systems, this is poor, but for "overlap removal", we mainly care about
-        # the largest atoms not overlapping.
-
-        # A better approach for mixed species safety valve is to use a repulsive-only potential
-        # or just pick the smallest sigma to allow some closeness, or average.
-        # Let's use the average covalent radius to estimate sigma.
-
         radii = [covalent_radii[Z] for Z in atoms.numbers]
         avg_radius = np.mean(radii)
         sigma = 2.0 * avg_radius * 0.8909 # sigma is roughly r_min / 2^(1/6)
 
         return sigma, epsilon
+
+    def get_calculator(self, atoms: Atoms) -> Calculator:
+        """
+        Returns an appropriate lightweight calculator (EMT or LJ) for the given structure.
+        """
+        unique_elements = set(atoms.get_chemical_symbols())
+
+        if unique_elements.issubset(self.emt_elements):
+            return EMT()
+        else:
+            # Fallback to LJ
+            sigma, epsilon = self._get_lj_parameters(atoms)
+            # rc cut-off: 3*sigma is standard
+            return LennardJones(epsilon=epsilon, sigma=sigma, rc=3.0*sigma)
 
     def run_pre_optimization(self, atoms: Atoms) -> Atoms:
         """
@@ -66,18 +75,8 @@ class PreOptimizer:
         # Work on a copy
         atoms = atoms.copy()
 
-        # Check if we can use EMT (all elements supported)
-        unique_elements = set(atoms.get_chemical_symbols())
-
-        if unique_elements.issubset(self.emt_elements):
-            calc = EMT()
-        else:
-            # Fallback to LJ
-            sigma, epsilon = self._get_lj_parameters(atoms)
-            # rc cut-off: 3*sigma is standard
-            calc = LennardJones(epsilon=epsilon, sigma=sigma, rc=3.0*sigma)
-
-        atoms.calc = calc
+        # Attach calculator
+        atoms.calc = self.get_calculator(atoms)
 
         try:
             dyn = BFGS(atoms, logfile=None) # Suppress log output

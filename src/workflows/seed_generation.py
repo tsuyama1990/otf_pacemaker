@@ -22,11 +22,11 @@ from src.core.config import Config
 from src.labeling.strategies.delta_labeler import DeltaLabeler
 from src.labeling.calculators.shifted_lj import ShiftedLennardJones
 from src.training.strategies.pacemaker import PacemakerTrainer
-from src.generation.candidate import RandomStructureGenerator
-from src.generation.filter import MACEFilter
-from src.generation.sampler import DirectSampler
-from src.generation.scenarios import ScenarioFactory
-from src.generation.optimizer import FoundationOptimizer
+from src.scenario_generation.candidate import RandomStructureGenerator
+from src.scenario_generation.filter import MACEFilter
+from src.scenario_generation.sampler import DirectSampler
+from src.scenario_generation.scenarios import ScenarioFactory
+from src.scenario_generation.optimizer import FoundationOptimizer
 
 # Configure logging
 logger = logging.getLogger(__name__)

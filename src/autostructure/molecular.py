@@ -104,6 +104,10 @@ class MolecularGenerator(BaseGenerator):
     def generate_high_pressure_packing(self):
         """
         Compresses cell volume to reduce intermolecular distances.
+
+        NOTE: This strategy relies on the PreOptimizer using a Fixed-Cell relaxation (like standard BFGS).
+        The cell is manually compressed here, and the subsequent optimization relaxes the atomic positions
+        to accommodate the new density without expanding the cell back.
         """
         # Scaling the lattice vectors reduces ALL distances (Intra and Inter).
         # But Intra bonds are stiff, Inter are soft.
