@@ -6,9 +6,9 @@ import shutil
 import tempfile
 from pathlib import Path
 from ase import Atoms
-from src.config import Config
+from src.core.config import Config
 from src.main import main
-from src.orchestrator import ActiveLearningOrchestrator
+from src.workflows.orchestrator import ActiveLearningOrchestrator
 from src.utils.logger import CSVLogger
 
 class TestIntegrationPhase3(unittest.TestCase):
@@ -157,7 +157,7 @@ class TestIntegrationPhase3(unittest.TestCase):
         clusters = [atoms.copy() for _ in range(4)]
 
         # Test with ProcessPoolExecutor mocked to avoid pickling issues and ensure we are testing logic
-        with patch("src.orchestrator.ProcessPoolExecutor") as MockExecutor:
+        with patch("src.workflows.orchestrator.ProcessPoolExecutor") as MockExecutor:
             instance = MockExecutor.return_value
             instance.__enter__.return_value = instance
 

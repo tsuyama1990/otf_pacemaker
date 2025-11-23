@@ -2,7 +2,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 import numpy as np
 from ase import Atoms
-from src.active_learning import SmallCellGenerator, MaxGammaSampler
+from src.generation.strategies.small_cell import SmallCellGenerator
+from src.sampling.strategies.max_gamma import MaxGammaSampler
 
 class TestSmallCellGenerator(unittest.TestCase):
     def setUp(self):
@@ -23,9 +24,9 @@ class TestSmallCellGenerator(unittest.TestCase):
                            cell=[10, 10, 10],
                            pbc=True)
 
-    @patch('src.active_learning.LAMMPS')
-    @patch('src.active_learning.ExpCellFilter')
-    @patch('src.active_learning.FIRE')
+    @patch('src.generation.strategies.small_cell.LAMMPS')
+    @patch('src.generation.strategies.small_cell.ExpCellFilter')
+    @patch('src.generation.strategies.small_cell.FIRE')
     def test_generate_structure(self, mock_fire, mock_filter, mock_lammps):
         # Setup mocks
         mock_calc = MagicMock()
@@ -51,9 +52,9 @@ class TestSmallCellGenerator(unittest.TestCase):
         dists = np.linalg.norm(positions - center_pos, axis=1)
         self.assertLess(np.min(dists), 0.01) # One atom should be at center
 
-    @patch('src.active_learning.LAMMPS')
-    @patch('src.active_learning.ExpCellFilter')
-    @patch('src.active_learning.FIRE')
+    @patch('src.generation.strategies.small_cell.LAMMPS')
+    @patch('src.generation.strategies.small_cell.ExpCellFilter')
+    @patch('src.generation.strategies.small_cell.FIRE')
     def test_relaxation_called(self, mock_fire, mock_filter, mock_lammps):
         mock_calc = MagicMock()
         mock_lammps.return_value = mock_calc
@@ -83,13 +84,15 @@ class TestMaxGammaSampler(unittest.TestCase):
         atoms.set_array('f_f_gamma', np.array([0.1, 0.5, 0.2, 0.9, 0.0]))
 
         # Test n_clusters = 1
-        indices = sampler.sample(atoms, 1)
-        self.assertEqual(indices, [3])
+        indices = sampler.sample(atoms=atoms, n_clusters=1)
+        # Result is list of tuples (atoms, index)
+        self.assertEqual(indices[0][1], 3)
 
         # Test n_clusters = 2
-        indices = sampler.sample(atoms, 2)
+        indices = sampler.sample(atoms=atoms, n_clusters=2)
         # Should be sorted max first
-        self.assertEqual(indices, [3, 1])
+        self.assertEqual(indices[0][1], 3)
+        self.assertEqual(indices[1][1], 1)
 
     def test_sample_raises_error_on_missing(self):
         sampler = MaxGammaSampler()
@@ -97,7 +100,7 @@ class TestMaxGammaSampler(unittest.TestCase):
         # No gamma array
 
         with self.assertRaises(ValueError):
-             sampler.sample(atoms, 2)
+             sampler.sample(atoms=atoms, n_clusters=2)
 
 if __name__ == '__main__':
     unittest.main()

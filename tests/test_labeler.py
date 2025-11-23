@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from ase import Atoms
 from ase.calculators.calculator import Calculator, all_changes
-from src.labeler import DeltaLabeler
+from src.labeling.strategies.delta_labeler import DeltaLabeler
 
 class MockCalculator(Calculator):
     """Mock Calculator that returns fixed energy, forces and stress."""
@@ -53,7 +53,7 @@ def test_delta_labeling_real_lj():
     dft_forces = np.array([[0, 0, 0.5], [0, 0, -0.5]])
     mock_dft = MockCalculator(energy=dft_energy, forces=dft_forces)
 
-    from src.labeler import ShiftedLennardJones
+    from src.labeling.calculators.shifted_lj import ShiftedLennardJones
     lj_calc = ShiftedLennardJones(epsilon=1.0, sigma=1.0, rc=2.5)
 
     # Calculate expected LJ manually to verify

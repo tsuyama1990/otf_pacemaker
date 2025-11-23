@@ -8,13 +8,16 @@ import sys
 from pathlib import Path
 from ase.calculators.espresso import Espresso, EspressoProfile
 
-from src.active_learning import MaxGammaSampler, SmallCellGenerator
-from src.config import Config
-from src.labeler import DeltaLabeler, ShiftedLennardJones
-from src.md_engine import LAMMPSRunner, LAMMPSInputGenerator
-from src.trainer import PacemakerTrainer
-from src.orchestrator import ActiveLearningOrchestrator
-from src.seed_generation import SeedGenerator
+from src.sampling.strategies.max_gamma import MaxGammaSampler
+from src.generation.strategies.small_cell import SmallCellGenerator
+from src.core.config import Config
+from src.labeling.strategies.delta_labeler import DeltaLabeler
+from src.labeling.calculators.shifted_lj import ShiftedLennardJones
+from src.engines.lammps.runner import LAMMPSRunner
+from src.engines.lammps.input_generator import LAMMPSInputGenerator
+from src.training.strategies.pacemaker import PacemakerTrainer
+from src.workflows.orchestrator import ActiveLearningOrchestrator
+from src.workflows.seed_generation import SeedGenerator
 from src.utils.logger import CSVLogger
 
 # Setup logging

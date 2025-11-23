@@ -1,7 +1,4 @@
-"""Training module for Pacemaker potentials.
-
-This module handles the preparation of datasets and training of ACE potentials.
-"""
+"""Pacemaker Training Strategy."""
 
 import pandas as pd
 import subprocess
@@ -11,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 from ase import Atoms
 
-from src.interfaces import Trainer
+from src.core.interfaces import Trainer
 
 logger = logging.getLogger(__name__)
 
