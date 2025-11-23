@@ -8,3 +8,11 @@ class SimulationState(Enum):
     COMPLETED = "completed"
     UNCERTAIN = "uncertain"
     FAILED = "failed"
+
+class KMCStatus(Enum):
+    """Enum representing the result of a KMC step."""
+
+    SUCCESS = "success"
+    UNCERTAIN = "uncertain"
+    NO_EVENT = "no_event"
+    FAILED = "failed"

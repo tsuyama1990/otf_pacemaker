@@ -5,9 +5,10 @@ of the active learning loop, enabling dependency inversion and easier testing.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple, Any, Dict
+from dataclasses import dataclass, field
 from ase import Atoms
-from src.core.enums import SimulationState
+from src.core.enums import SimulationState, KMCStatus
 
 
 class MDEngine(ABC):
@@ -23,6 +24,32 @@ class MDEngine(ABC):
         is_restart: bool = False,
     ) -> SimulationState:
         """Run the MD simulation."""
+        pass
+
+
+@dataclass
+class KMCResult:
+    """Result of a kMC step."""
+    status: KMCStatus
+    structure: Atoms
+    time_step: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class KMCEngine(ABC):
+    """Interface for Kinetic Monte Carlo engines."""
+
+    @abstractmethod
+    def run_step(self, initial_atoms: Atoms, potential_path: str) -> KMCResult:
+        """Run a single kMC step (saddle search + selection).
+
+        Args:
+            initial_atoms: Starting structure.
+            potential_path: Path to the potential file.
+
+        Returns:
+            KMCResult: Result containing status, new structure, time increment, etc.
+        """
         pass
 
 

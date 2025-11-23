@@ -15,6 +15,7 @@ from src.labeling.strategies.delta_labeler import DeltaLabeler
 from src.labeling.calculators.shifted_lj import ShiftedLennardJones
 from src.engines.lammps.runner import LAMMPSRunner
 from src.engines.lammps.input_generator import LAMMPSInputGenerator
+from src.engines.kmc import OffLatticeKMCEngine
 from src.training.strategies.pacemaker import PacemakerTrainer
 from src.workflows.orchestrator import ActiveLearningOrchestrator
 from src.workflows.seed_generation import SeedGenerator
@@ -96,6 +97,12 @@ def main():
         input_generator=input_generator
     )
 
+    # KMC Engine
+    kmc_engine = OffLatticeKMCEngine(
+        kmc_params=config.kmc_params,
+        al_params=config.al_params
+    )
+
     # Sampler
     sampler = MaxGammaSampler()
 
@@ -166,6 +173,7 @@ def main():
     orchestrator = ActiveLearningOrchestrator(
         config=config,
         md_engine=runner,
+        kmc_engine=kmc_engine,
         sampler=sampler,
         generator=generator,
         labeler=labeler,
