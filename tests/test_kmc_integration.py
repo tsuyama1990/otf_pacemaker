@@ -1,6 +1,7 @@
 """Test imports and basic structure of new components."""
 import sys
 import pytest
+import numpy as np
 from unittest.mock import MagicMock, patch
 
 # Mock pyace
@@ -143,28 +144,40 @@ def test_kmc_parallel_execution(mock_fire, mock_dimer_control, mock_min_mode):
 @patch("src.engines.kmc.DimerControl")
 @patch("src.engines.kmc.FIRE")
 def test_active_region_selection(mock_fire, mock_dimer_control, mock_min_mode):
-    from src.engines.kmc import _select_active_atoms
-
     # Setup atoms: 2 atoms, one at z=0, one at z=15
     atoms = Atoms("CoTi", positions=[[0,0,0], [0,0,15]])
 
+    # Mock coordination numbers (cns). Let's assume both are low CN (adsorbates)
+    cns = np.array([1, 1])
+
     # 1. Surface mode
-    params = KMCParams(active_region_mode="surface", active_z_cutoff=10.0)
-    indices = _select_active_atoms(atoms, params)
+    # NOTE: The new implementation uses KMCParams stored in the engine instance.
+    # So we must instantiate the engine.
+    kmc_params = KMCParams(active_region_mode="surface", active_z_cutoff=10.0)
+    al_params = ALParams(gamma_threshold=0.1, n_clusters=1, r_core=1.0, box_size=10.0, initial_potential="p", potential_yaml_path="y")
+    engine = OffLatticeKMCEngine(kmc_params, al_params)
+
+    indices = engine.select_active_candidates(atoms, cns)
+    # surface_mask = z > 10.0 -> Index 1 (Ti at 15) is True. Index 0 (Co at 0) is False.
     assert len(indices) == 1
     assert indices[0] == 1 # The one at z=15
 
     # 2. Species mode
-    params = KMCParams(active_region_mode="species", active_species=["Co"])
-    indices = _select_active_atoms(atoms, params)
+    kmc_params = KMCParams(active_region_mode="species", active_species=["Co"])
+    engine = OffLatticeKMCEngine(kmc_params, al_params)
+    indices = engine.select_active_candidates(atoms, cns)
+    # Co is at index 0. Ti is index 1.
     assert len(indices) == 1
-    assert indices[0] == 0 # Co is at index 0
+    assert indices[0] == 0
 
-    # 3. Both
-    params = KMCParams(active_region_mode="surface_and_species", active_z_cutoff=10.0, active_species=["Ti"])
-    indices = _select_active_atoms(atoms, params)
+    # 3. Both (surface AND species)
+    # NOTE: Logic is: species_mask & surface_mask & cn_mask
+    kmc_params = KMCParams(active_region_mode="surface_and_species", active_z_cutoff=10.0, active_species=["Ti"])
+    engine = OffLatticeKMCEngine(kmc_params, al_params)
+    indices = engine.select_active_candidates(atoms, cns)
+    # Ti (idx 1) is species? Yes. Surface? Yes (>10). CN? Yes.
     assert len(indices) == 1
-    assert indices[0] == 1 # Ti at z=15
+    assert indices[0] == 1
 
 @patch("src.engines.kmc.MinModeAtoms")
 @patch("src.engines.kmc.DimerControl")
@@ -173,9 +186,12 @@ def test_kmc_high_gamma_interruption(mock_fire, mock_dimer_control, mock_min_mod
     # Set active_region_mode="all" (or just ensure defaults pass)
     # Default is "surface_and_species" with Co,Ti,O and z>10.
     # Our atoms are H2 at z=0. So we must override.
+    # We must also ensure active_z_cutoff is low enough, OR set z high enough.
+    # KMCParams default active_z_cutoff is usually 10.0 (need to check definition, assuming it blocks z=0)
     kmc_params = KMCParams(
         active=True, n_searches=1, check_interval=2,
-        active_region_mode="species", active_species=["H"]
+        active_region_mode="species", active_species=["H"],
+        active_z_cutoff=-10.0 # Allow z=0
     )
     al_params = ALParams(
         gamma_threshold=0.5,

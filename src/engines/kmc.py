@@ -341,6 +341,42 @@ class OffLatticeKMCEngine(KMCEngine):
         return KMCResult(status=KMCStatus.NO_EVENT, structure=full_atoms_snapshot)
 
 
+    def select_active_candidates(self, atoms: Atoms, cns: np.ndarray) -> np.ndarray:
+        """Select candidate atoms for KMC searches based on configuration.
+
+        Args:
+            atoms: The atomic structure.
+            cns: Coordination numbers for each atom.
+
+        Returns:
+            Array of indices of valid candidate atoms.
+        """
+        # Defaults (Select All)
+        species_mask = np.ones(len(atoms), dtype=bool)
+        surface_mask = np.ones(len(atoms), dtype=bool)
+
+        mode = self.kmc_params.active_region_mode
+
+        # 1. Species Filter
+        if mode in ["species", "surface_and_species"]:
+            if self.kmc_params.active_species:
+                 symbols = np.array(atoms.get_chemical_symbols())
+                 species_mask = np.isin(symbols, self.kmc_params.active_species)
+
+        # 2. Surface Filter
+        if mode in ["surface", "surface_and_species"]:
+            z_coords = atoms.positions[:, 2]
+            surface_mask = z_coords > self.kmc_params.active_z_cutoff
+
+        # 3. Low CN Filter (Always applied for adsorbates?)
+        # The memory says "strictly filters out atoms with CN >= adsorbate_cn_cutoff".
+        # This implies it's a hard constraint for "adsorbate" KMC.
+        cn_mask = cns < self.kmc_params.adsorbate_cn_cutoff
+
+        valid_mask = species_mask & surface_mask & cn_mask
+        candidate_indices = np.where(valid_mask)[0]
+        return candidate_indices
+
     def run_step(self, initial_atoms: Atoms, potential_path: str) -> KMCResult:
         """Run a single KMC step."""
 
@@ -378,20 +414,7 @@ class OffLatticeKMCEngine(KMCEngine):
         cns = np.diff(indptr)
 
         # 2. Target Selection
-        # Filter: Surface & Species & Low CN
-        # Species
-        symbols = np.array(atoms.get_chemical_symbols())
-        species_mask = np.isin(symbols, self.kmc_params.active_species)
-
-        # Surface
-        z_coords = atoms.positions[:, 2]
-        surface_mask = z_coords > self.kmc_params.active_z_cutoff
-
-        # Low CN
-        cn_mask = cns < self.kmc_params.adsorbate_cn_cutoff
-
-        valid_mask = species_mask & surface_mask & cn_mask
-        candidate_indices = np.where(valid_mask)[0]
+        candidate_indices = self.select_active_candidates(atoms, cns)
 
         if len(candidate_indices) == 0:
             logger.warning("No valid KMC candidates.")
