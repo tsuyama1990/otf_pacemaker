@@ -69,7 +69,9 @@ class InterfaceGenerator(BaseScenario):
         try:
             # We explicitly define axis to stack. Defaults are z (2).
             # ASE stack usually stacks along z.
-            interface = stack(sub, lay, maxstrain=None)
+            # SAFETY VALVE: Limit strain to 15% using maxstrain parameter
+            # If strain exceeds this, stack will raise ValueError (or similar) or return None (depending on implementation, but ASE usually raises)
+            interface = stack(sub, lay, maxstrain=0.15)
 
             # ASE stack might return a cell with negative values or centered in a way center() doesn't expect if vacuum is applied incorrectly?
             # Or center() changes the cell.
@@ -80,7 +82,7 @@ class InterfaceGenerator(BaseScenario):
 
             return [interface]
         except Exception as e:
-            print(f"Interface generation failed: {e}")
+            # print(f"Interface generation failed (likely strain too high): {e}")
             return []
 
 

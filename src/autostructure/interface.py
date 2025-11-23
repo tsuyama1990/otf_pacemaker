@@ -66,11 +66,12 @@ class InterfaceBuilder(BaseGenerator):
         scale_x = a_lengths[0] / bx
         scale_y = a_lengths[1] / by
 
-        # SAFETY CHECK: Limiter for strain
+        # --- SAFETY VALVE START ---
+        # Limit strain to 15% to avoid physical nonsense
         if abs(scale_x - 1.0) > 0.15 or abs(scale_y - 1.0) > 0.15:
-            # Strain too high, skip epitaxial generation
-            # self.logger.warning(...) if logger was available, or just return
+            # logger.warning(f"Skipping epitaxial stack: Strain too high ({scale_x:.2f}, {scale_y:.2f})")
             return
+        # --- SAFETY VALVE END ---
 
         # Construct new cell for B
         # We scale the basis vectors directly
@@ -151,9 +152,10 @@ class InterfaceBuilder(BaseGenerator):
             scale_x = a_lengths[0] / bx
             scale_y = a_lengths[1] / by
 
-            # Check strain again for gradient intermix
+            # --- SAFETY VALVE START ---
             if abs(scale_x - 1.0) > 0.15 or abs(scale_y - 1.0) > 0.15:
                 return
+            # --- SAFETY VALVE END ---
 
             new_cell_b = np.array(b_cell)
             new_cell_b[0] *= scale_x
