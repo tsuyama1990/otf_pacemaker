@@ -170,7 +170,13 @@ def test_active_region_selection(mock_fire, mock_dimer_control, mock_min_mode):
 @patch("src.engines.kmc.DimerControl")
 @patch("src.engines.kmc.FIRE")
 def test_kmc_high_gamma_interruption(mock_fire, mock_dimer_control, mock_min_mode):
-    kmc_params = KMCParams(active=True, n_searches=1, check_interval=2)
+    # Set active_region_mode="all" (or just ensure defaults pass)
+    # Default is "surface_and_species" with Co,Ti,O and z>10.
+    # Our atoms are H2 at z=0. So we must override.
+    kmc_params = KMCParams(
+        active=True, n_searches=1, check_interval=2,
+        active_region_mode="species", active_species=["H"]
+    )
     al_params = ALParams(
         gamma_threshold=0.5,
         n_clusters=1,

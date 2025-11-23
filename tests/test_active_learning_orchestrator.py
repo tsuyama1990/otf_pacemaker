@@ -81,6 +81,7 @@ def test_orchestrator_initial_asi_generation(mock_read, mock_exists, mock_mkdir,
 
     # Mocks
     md_engine = MagicMock(spec=MDEngine)
+    kmc_engine = MagicMock()
     sampler = MagicMock()
     generator = MagicMock(spec=StructureGenerator)
     labeler = MagicMock(spec=Labeler)
@@ -100,7 +101,9 @@ def test_orchestrator_initial_asi_generation(mock_read, mock_exists, mock_mkdir,
     # This is tricky with patch('pathlib.Path.exists').
     # Let's simplify and just rely on the logic flow.
 
-    orch = ActiveLearningOrchestrator(config, md_engine, sampler, generator, labeler, trainer)
+    orch = ActiveLearningOrchestrator(
+        config, md_engine, kmc_engine, sampler, generator, labeler, trainer
+    )
 
     # We want to verify that trainer.update_active_set is called
     # when initial_active_set_path is None and initial_dataset_path is set.
