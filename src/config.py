@@ -7,7 +7,7 @@ It uses Python's standard dataclasses for definition and PyYAML for loading from
 import yaml
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass
@@ -44,6 +44,9 @@ class ALParams:
         r_core: Radius for the core region where forces are fully weighted (and fixed during relaxation).
         box_size: Size of the cubic small cell (Angstroms).
         initial_potential: Path to the initial potential file.
+        potential_yaml_path: Path to the potential configuration file (basis set definition).
+        initial_dataset_path: Path to the initial dataset (e.g. from Phase 1) to generate the first Active Set.
+        initial_active_set_path: Path to an existing Active Set file (.asi). Optional.
         stoichiometry_tolerance: Tolerance for stoichiometry check (default 0.1).
         min_bond_distance: Minimum bond distance for overlap removal (default 1.5).
     """
@@ -53,6 +56,9 @@ class ALParams:
     r_core: float
     box_size: float
     initial_potential: str
+    potential_yaml_path: str
+    initial_dataset_path: Optional[str] = None
+    initial_active_set_path: Optional[str] = None
     stoichiometry_tolerance: float = 0.1
     min_bond_distance: float = 1.5
 

@@ -5,7 +5,7 @@ of the active learning loop, enabling dependency inversion and easier testing.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Tuple, Any
 from ase import Atoms
 from src.enums import SimulationState
 
@@ -30,8 +30,18 @@ class Sampler(ABC):
     """Interface for uncertainty sampling strategies."""
 
     @abstractmethod
-    def sample(self, atoms: Atoms, n_clusters: int) -> List[int]:
-        """Select atom indices for training based on uncertainty."""
+    def sample(self, **kwargs) -> List[Tuple[Atoms, int]]:
+        """Select atoms/structures for training based on uncertainty.
+
+        Args:
+            **kwargs: Flexible arguments depending on the implementation.
+                      e.g., atoms (Atoms object), dump_file (str), etc.
+
+        Returns:
+            List[Tuple[Atoms, int]]: A list of tuples, where each tuple contains
+                                     the selected structure and the index of the
+                                     atom with the highest uncertainty within it.
+        """
         pass
 
 
@@ -62,6 +72,28 @@ class Trainer(ABC):
         pass
 
     @abstractmethod
-    def train(self, dataset_path: str, initial_potential: str) -> str:
-        """Train the potential."""
+    def update_active_set(self, dataset_path: str, potential_yaml_path: str) -> str:
+        """Update the active set using the dataset and potential definition.
+
+        Args:
+            dataset_path: Path to the full training dataset.
+            potential_yaml_path: Path to the potential basis set definition.
+
+        Returns:
+            str: Path to the updated active set file (.asi).
+        """
+        pass
+
+    @abstractmethod
+    def train(self, dataset_path: str, initial_potential: str, **kwargs) -> str:
+        """Train the potential.
+
+        Args:
+            dataset_path: Path to the training dataset.
+            initial_potential: Path to the initial potential (optional/nullable depending on implementation).
+            **kwargs: Additional arguments like potential_yaml_path, asi_path, etc.
+
+        Returns:
+            str: Path to the trained potential file.
+        """
         pass

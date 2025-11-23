@@ -51,9 +51,49 @@ class ActiveLearningOrchestrator:
         """Executes the active learning loop."""
         current_potential = self.config.al_params.initial_potential
         current_structure = self.config.md_params.initial_structure
+        current_asi = self.config.al_params.initial_active_set_path
+
         is_restart = False
         iteration = 0
         original_cwd = Path.cwd()
+
+        # Resolve paths that don't change
+        potential_yaml_path = self._resolve_path(self.config.al_params.potential_yaml_path, original_cwd)
+        initial_dataset_path = None
+        if self.config.al_params.initial_dataset_path:
+             initial_dataset_path = self._resolve_path(self.config.al_params.initial_dataset_path, original_cwd)
+
+        # 0. Initialize Active Set if needed
+        # If current_asi is None, we need to generate it from initial dataset
+        if not current_asi and initial_dataset_path:
+             logger.info("No initial Active Set provided. Generating from initial dataset...")
+             try:
+                 # We can use the Trainer to update the active set (generate initial one)
+                 # We need to temporarily be in a writable dir or handle absolute paths carefully.
+                 # Let's do it in 'data/seed' if it exists or just in root?
+                 # Trainer.update_active_set outputs to 'potential.asi' in current dir.
+                 # Let's generate it in 'data/seed' if we can or just assume one exists.
+                 # Actually, let's assume Phase 1 is done and we can check 'data/seed/potential.asi'
+                 # But if config didn't specify it, we generate it.
+
+                 # Let's create a temporary working dir for initialization or just do it in the first iteration dir?
+                 # Better to do it once.
+                 init_dir = original_cwd / "data" / "seed"
+                 init_dir.mkdir(parents=True, exist_ok=True)
+                 os.chdir(init_dir)
+
+                 current_asi = self.trainer.update_active_set(str(initial_dataset_path), str(potential_yaml_path))
+                 logger.info(f"Initial Active Set generated: {current_asi}")
+
+                 os.chdir(original_cwd)
+             except Exception as e:
+                 logger.error(f"Failed to generate initial active set: {e}")
+                 os.chdir(original_cwd)
+                 return
+
+        # If still no active set, MaxVolSampler might fail.
+        if not current_asi:
+             logger.warning("No Active Set available. Sampling might be suboptimal or fail.")
 
         while True:
             iteration += 1
@@ -67,6 +107,7 @@ class ActiveLearningOrchestrator:
 
                 # Resolve paths relative to original CWD
                 abs_potential_path = self._resolve_path(current_potential, original_cwd)
+                abs_asi_path = self._resolve_path(current_asi, original_cwd) if current_asi else None
 
                 if not abs_potential_path.exists():
                     logger.error(f"Potential file not found: {abs_potential_path}")
@@ -105,32 +146,47 @@ class ActiveLearningOrchestrator:
                     if not dump_file.exists():
                         raise FileNotFoundError("Dump file not found.")
 
-                    # Read last frame
-                    atoms = read(dump_file, index=-1, format="lammps-dump-text")
-
-                    # Fix symbols if needed
-                    self._ensure_chemical_symbols(atoms)
-
                     # Sample
-                    center_ids = self.sampler.sample(atoms, self.config.al_params.n_clusters)
+                    # We pass all necessary info via kwargs to support MaxVolSampler
+                    # Note: We need to pass 'atoms' for MaxGammaSampler (legacy)
+                    # and 'dump_file'/'potential_yaml'/'asi_path' for MaxVolSampler.
+
+                    # For compatibility, we can read the last frame for MaxGammaSampler
+                    # But if we use MaxVolSampler, we prefer it to handle the file.
+                    # Since we don't know which sampler we have (polymorphism), we prepare everything.
+
+                    last_frame = read(dump_file, index=-1, format="lammps-dump-text")
+                    self._ensure_chemical_symbols(last_frame)
+
+                    sample_kwargs = {
+                        "atoms": last_frame,
+                        "n_clusters": self.config.al_params.n_clusters,
+                        "dump_file": str(dump_file),
+                        "potential_yaml_path": str(potential_yaml_path),
+                        "asi_path": str(abs_asi_path) if abs_asi_path else None,
+                        "elements": self.config.md_params.elements
+                    }
+
+                    # Sampler returns List[Tuple[Atoms, int]]
+                    selected_samples = self.sampler.sample(**sample_kwargs)
 
                     labeled_clusters = []
-                    logger.info(f"Generating and labeling {len(center_ids)} small cells...")
+                    logger.info(f"Generating and labeling {len(selected_samples)} small cells...")
 
-                    for cid in center_ids:
+                    for atoms, center_id in selected_samples:
                         try:
                             # Generate Small Cell
-                            cell = self.generator.generate_cell(atoms, cid, str(abs_potential_path))
+                            cell = self.generator.generate_cell(atoms, center_id, str(abs_potential_path))
 
                             # Label
                             labeled_cluster = self.labeler.label(cell)
                             if labeled_cluster is None:
-                                logger.warning(f"Labeling failed for cluster {cid}. Skipping.")
+                                logger.warning(f"Labeling failed for cluster {center_id}. Skipping.")
                                 continue
 
                             labeled_clusters.append(labeled_cluster)
                         except Exception as e:
-                            logger.warning(f"Processing failed for cluster {cid}: {e}. Skipping.")
+                            logger.warning(f"Processing failed for cluster {center_id}: {e}. Skipping.")
                             continue
 
                     if not labeled_clusters:
@@ -140,9 +196,27 @@ class ActiveLearningOrchestrator:
                     # Train
                     logger.info("Training new potential...")
                     dataset_path = self.trainer.prepare_dataset(labeled_clusters)
-                    new_potential = self.trainer.train(dataset_path, str(abs_potential_path))
+
+                    # Train and update Active Set
+                    # Note: we pass potential_yaml_path so trainer can update active set
+                    new_potential = self.trainer.train(
+                        dataset_path=dataset_path,
+                        initial_potential=str(abs_potential_path),
+                        potential_yaml_path=str(potential_yaml_path),
+                        asi_path=str(abs_asi_path) if abs_asi_path else None
+                    )
 
                     current_potential = str(Path(new_potential).resolve())
+
+                    # If Trainer updated the active set, we should ideally get the new path.
+                    # Currently trainer.train returns only potential path.
+                    # However, Trainer stores the active set in 'potential.asi' in the working dir.
+                    # So we should update 'current_asi' to point to this new file.
+                    new_asi_path = work_dir / "potential.asi"
+                    if new_asi_path.exists():
+                        current_asi = str(new_asi_path.resolve())
+                        logger.info(f"Updating current active set path to: {current_asi}")
+
                     is_restart = True
                     logger.info(f"New potential trained: {current_potential}")
 
