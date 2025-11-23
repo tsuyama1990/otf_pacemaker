@@ -5,9 +5,9 @@ It uses Python's standard dataclasses for definition and PyYAML for loading from
 """
 
 import yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
 
 
 @dataclass
@@ -98,6 +98,36 @@ class LJParams:
 
 
 @dataclass
+class PreOptimizationParams:
+    """Parameters for MACE pre-optimization.
+
+    Attributes:
+        enabled: Whether to enable pre-optimization.
+        model: MACE model size ("small", "medium", "large").
+        fmax: Force convergence criterion.
+        steps: Maximum number of optimization steps.
+        device: Device to run MACE on.
+    """
+    enabled: bool = False
+    model: str = "medium"
+    fmax: float = 0.1
+    steps: int = 50
+    device: str = "cuda"
+
+
+@dataclass
+class GenerationParams:
+    """Parameters for scenario-driven generation.
+
+    Attributes:
+        pre_optimization: Settings for MACE pre-optimization.
+        scenarios: List of scenario configurations.
+    """
+    pre_optimization: PreOptimizationParams = field(default_factory=PreOptimizationParams)
+    scenarios: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     """Main configuration class aggregating all parameter sections.
 
@@ -106,12 +136,14 @@ class Config:
         al_params: Active Learning parameters.
         dft_params: DFT calculation parameters.
         lj_params: Lennard-Jones potential parameters.
+        generation_params: Generation and pre-optimization parameters.
     """
 
     md_params: MDParams
     al_params: ALParams
     dft_params: DFTParams
     lj_params: LJParams
+    generation_params: GenerationParams = field(default_factory=GenerationParams)
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "Config":
@@ -123,11 +155,20 @@ class Config:
         Returns:
             Config: An initialized Config object.
         """
+        gen_dict = config_dict.get("generation", {})
+        pre_opt_dict = gen_dict.get("pre_optimization", {})
+
+        generation_params = GenerationParams(
+            pre_optimization=PreOptimizationParams(**pre_opt_dict),
+            scenarios=gen_dict.get("scenarios", [])
+        )
+
         return cls(
             md_params=MDParams(**config_dict.get("md_params", {})),
             al_params=ALParams(**config_dict.get("al_params", {})),
             dft_params=DFTParams(**config_dict.get("dft_params", {})),
             lj_params=LJParams(**config_dict.get("lj_params", {})),
+            generation_params=generation_params
         )
 
     @classmethod
