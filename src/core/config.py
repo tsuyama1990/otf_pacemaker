@@ -8,6 +8,25 @@ import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, List, Dict
+from ase.data import covalent_radii, atomic_numbers
+
+
+def generate_default_lj_params(elements: List[str]) -> "LJParams":
+    """Generates default Lennard-Jones parameters based on input elements.
+
+    Calculates sigma based on the average covalent radius of the input elements.
+    Epsilon is set to 1.0 eV (stiff wall) and cutoff is set to 2.5 * sigma.
+
+    Args:
+        elements: List of chemical symbols.
+
+    Returns:
+        LJParams: Generated LJ parameters.
+    """
+    radii = [covalent_radii[atomic_numbers[el]] for el in elements]
+    r_avg = sum(radii) / len(radii)
+    sigma = 2 * r_avg * (2 ** (-1 / 6))
+    return LJParams(epsilon=1.0, sigma=sigma, cutoff=2.5 * sigma)
 
 
 @dataclass
@@ -210,12 +229,26 @@ class Config:
             scenarios=gen_dict.get("scenarios", [])
         )
 
+        md_dict = config_dict.get("md_params", {})
+        lj_dict = config_dict.get("lj_params")
+
+        if lj_dict:
+            lj_params = LJParams(**lj_dict)
+        else:
+            elements = md_dict.get("elements")
+            if elements:
+                lj_params = generate_default_lj_params(elements)
+            else:
+                # This will raise the missing arguments error for LJParams,
+                # or let MDParams raise missing 'elements' error.
+                lj_params = LJParams(**{})
+
         return cls(
-            md_params=MDParams(**config_dict.get("md_params", {})),
+            md_params=MDParams(**md_dict),
             al_params=ALParams(**config_dict.get("al_params", {})),
             kmc_params=KMCParams(**config_dict.get("kmc_params", {})),
             dft_params=DFTParams(**config_dict.get("dft_params", {})),
-            lj_params=LJParams(**config_dict.get("lj_params", {})),
+            lj_params=lj_params,
             generation_params=generation_params
         )
 
