@@ -16,6 +16,8 @@ dependencies = [
     "pyxtal",
     "scikit-learn",
     "pytest>=9.0.1",
+    "pymatgen",
+    "mp-api",
 ]
 
 [build-system]
