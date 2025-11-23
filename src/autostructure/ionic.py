@@ -100,33 +100,29 @@ class IonicGenerator(BaseGenerator):
         MD snapshots at 0.6 ~ 0.8 Tm.
         """
         # Convert to ASE
-        atoms = self.pre_optimizer.run_pre_optimization(AseAtomsAdaptor.get_atoms(self.structure))
+        atoms = AseAtomsAdaptor.get_atoms(self.structure)
         atoms *= (2,2,2) # Supercell for MD
+
+        # Explicitly attach calculator using PreOptimizer factory
+        atoms.calc = self.pre_optimizer.get_calculator(atoms)
+
+        # Relax starting structure
+        # We can still use run_pre_optimization, but we ensure calculator is set explicitly
+        try:
+             atoms = self.pre_optimizer.run_pre_optimization(atoms)
+             # run_pre_optimization returns a copy, so we must re-attach calculator if it was stripped (it shouldn't be, but let's be safe)
+             if atoms.calc is None:
+                  atoms.calc = self.pre_optimizer.get_calculator(atoms)
+        except:
+             pass
 
         target_temps = [0.6 * T_m, 0.8 * T_m]
 
         for T in target_temps:
             atoms_md = atoms.copy()
-            atoms_md.calc = self.pre_optimizer.emt_elements.issubset(set(atoms_md.get_chemical_symbols())) and self.pre_optimizer.run_pre_optimization(atoms).calc or None
-
-            # If we don't have a cheap force field (EMT), we can't run MD easily in this builder
-            # The prompt implies WE build the dataset FOR MLIP training.
-            # Using MD to generate structures requires a potential.
-            # "High-temp MD snapshots... (amplitude is large)"
-            # If we have no potential, we can simulate this via Rattling (Monte Carlo) or
-            # just simple Debye-like thermal displacement.
-
-            # Since running actual MD requires a potential (and we are building the dataset FOR the potential),
-            # the standard approach in "Active Learning Start" is to use "Rattling".
-            # However, the user explicitly asked for "MD snapshots".
-            # If "Pre-optimization" uses LJ, we can run MD with LJ.
-
-            # We use the fallback LJ from PreOptimizer for this MD.
-            try:
-                # PreOptimizer works on a copy and returns it with calculator attached/relaxed
-                atoms_md = self.pre_optimizer.run_pre_optimization(atoms_md)
-            except:
-                pass
+            # Ensure calculator is attached to the copy
+            if atoms_md.calc is None:
+                atoms_md.calc = self.pre_optimizer.get_calculator(atoms_md)
 
             # Run short MD
             if atoms_md.calc:

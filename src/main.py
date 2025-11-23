@@ -9,7 +9,7 @@ from pathlib import Path
 from ase.calculators.espresso import Espresso, EspressoProfile
 
 from src.sampling.strategies.max_gamma import MaxGammaSampler
-from src.generation.strategies.small_cell import SmallCellGenerator
+from src.scenario_generation.strategies.small_cell import SmallCellGenerator
 from src.core.config import Config
 from src.labeling.strategies.delta_labeler import DeltaLabeler
 from src.labeling.calculators.shifted_lj import ShiftedLennardJones

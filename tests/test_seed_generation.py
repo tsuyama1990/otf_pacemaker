@@ -10,9 +10,9 @@ from pathlib import Path
 # Ensure src is in path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from src.generation.candidate import RandomStructureGenerator
-from src.generation.filter import MACEFilter
-from src.generation.sampler import DirectSampler
+from src.scenario_generation.candidate import RandomStructureGenerator
+from src.scenario_generation.filter import MACEFilter
+from src.scenario_generation.sampler import DirectSampler
 from src.workflows.seed_generation import main as seed_main
 from src.workflows.seed_generation import SeedGenerator
 from src.core.config import Config, MDParams, DFTParams, LJParams, ALParams
@@ -20,7 +20,7 @@ from src.core.config import Config, MDParams, DFTParams, LJParams, ALParams
 class TestRandomStructureGenerator(unittest.TestCase):
     def test_generate(self):
         # Mock pyxtal
-        with patch('src.generation.candidate.pyxtal') as mock_pyxtal_lib:
+        with patch('src.scenario_generation.candidate.pyxtal') as mock_pyxtal_lib:
             mock_struc = MagicMock()
             mock_struc.valid = True
             mock_struc.to_ase.return_value = Atoms('Al2', positions=[[0,0,0], [1,1,1]], cell=[5,5,5])
@@ -53,7 +53,7 @@ class TestRandomStructureGenerator(unittest.TestCase):
 class TestMACEFilter(unittest.TestCase):
     def test_filter(self):
         # Mock mace_mp
-        with patch('src.generation.filter.mace_mp') as mock_mace_class:
+        with patch('src.scenario_generation.filter.mace_mp') as mock_mace_class:
             mock_calc = MagicMock()
             mock_mace_class.return_value = mock_calc
 
@@ -95,7 +95,7 @@ class TestMACEFilter(unittest.TestCase):
 class TestDirectSampler(unittest.TestCase):
     def test_sample(self):
         # Mock Birch
-        with patch('src.generation.sampler.Birch') as mock_birch_class:
+        with patch('src.scenario_generation.sampler.Birch') as mock_birch_class:
             mock_birch = MagicMock()
             mock_birch_class.return_value = mock_birch
 
@@ -108,7 +108,7 @@ class TestDirectSampler(unittest.TestCase):
 
             # Mock compute_descriptors
             # We need to mock the subprocess or the private method
-            with patch('src.generation.sampler.DirectSampler._compute_descriptors') as mock_compute:
+            with patch('src.scenario_generation.sampler.DirectSampler._compute_descriptors') as mock_compute:
                 # 3 structures, 5 features
                 mock_compute.return_value = np.array([
                     [1.0, 0.0], # 0
