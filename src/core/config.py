@@ -50,6 +50,7 @@ class ALParams:
         stoichiometry_tolerance: Tolerance for stoichiometry check (default 0.1).
         min_bond_distance: Minimum bond distance for overlap removal (default 1.5).
         num_parallel_labeling: Number of parallel processes for labeling (default 4).
+        query_strategy: Strategy for querying new data ("uncertainty" or "k_step_force").
     """
 
     gamma_threshold: float
@@ -63,6 +64,30 @@ class ALParams:
     stoichiometry_tolerance: float = 0.1
     min_bond_distance: float = 1.5
     num_parallel_labeling: int = 4
+    query_strategy: str = "uncertainty"
+
+
+@dataclass
+class KMCParams:
+    """Parameters for kMC simulations (Transition State Search).
+
+    Attributes:
+        active: Whether to enable kMC phase.
+        temperature: Simulation temperature in Kelvin for rate estimation.
+        n_searches: Number of dimer searches to perform per kMC step.
+        search_radius: Radius for random displacement in dimer search (Angstroms).
+        dimer_fmax: Force convergence criterion for dimer optimization.
+        check_interval: Number of steps between uncertainty checks during optimization (k-step).
+        prefactor: Prefactor for Arrhenius rate equation.
+    """
+
+    active: bool = False
+    temperature: float = 300.0
+    n_searches: int = 10
+    search_radius: float = 0.1
+    dimer_fmax: float = 0.05
+    check_interval: int = 5
+    prefactor: float = 1e12
 
 
 @dataclass
@@ -134,6 +159,7 @@ class Config:
     Attributes:
         md_params: Molecular Dynamics parameters.
         al_params: Active Learning parameters.
+        kmc_params: kMC parameters.
         dft_params: DFT calculation parameters.
         lj_params: Lennard-Jones potential parameters.
         generation_params: Generation and pre-optimization parameters.
@@ -143,6 +169,7 @@ class Config:
     al_params: ALParams
     dft_params: DFTParams
     lj_params: LJParams
+    kmc_params: KMCParams = field(default_factory=KMCParams)
     generation_params: GenerationParams = field(default_factory=GenerationParams)
 
     @classmethod
@@ -166,6 +193,7 @@ class Config:
         return cls(
             md_params=MDParams(**config_dict.get("md_params", {})),
             al_params=ALParams(**config_dict.get("al_params", {})),
+            kmc_params=KMCParams(**config_dict.get("kmc_params", {})),
             dft_params=DFTParams(**config_dict.get("dft_params", {})),
             lj_params=LJParams(**config_dict.get("lj_params", {})),
             generation_params=generation_params
