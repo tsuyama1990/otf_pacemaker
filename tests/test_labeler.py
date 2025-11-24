@@ -43,6 +43,10 @@ def test_delta_labeling():
     np.testing.assert_allclose(labeled_atoms.info['energy_dft_raw'], dft_energy)
     np.testing.assert_allclose(labeled_atoms.arrays['forces_dft_raw'], dft_forces)
 
+    # Check that 'stress' is removed and 'virial' is present
+    assert 'stress' not in labeled_atoms.info
+    assert 'virial' in labeled_atoms.info
+
 def test_delta_labeling_real_lj():
     # Test integration with actual ShiftedLennardJones if needed, or just rely on unit test of DeltaLabeler logic
     # Here we repeat the previous test logic but injecting ShiftedLennardJones as the baseline
@@ -72,7 +76,11 @@ def test_delta_labeling_real_lj():
     expected_delta_f = dft_forces - f_lj_expected
     # mock_dft has 0 stress by default (from init)
     expected_delta_s = np.zeros(6) - s_lj_expected
+    expected_virial = expected_delta_s * atoms.get_volume()
 
     np.testing.assert_allclose(labeled_atoms.info['energy'], expected_delta_e)
     np.testing.assert_allclose(labeled_atoms.arrays['forces'], expected_delta_f)
-    np.testing.assert_allclose(labeled_atoms.info['stress'], expected_delta_s)
+
+    # Verify virial and absence of stress key
+    assert 'stress' not in labeled_atoms.info
+    np.testing.assert_allclose(labeled_atoms.info['virial'], expected_virial)

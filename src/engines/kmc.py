@@ -32,7 +32,9 @@ except ImportError:
 
 from src.core.interfaces import KMCEngine, KMCResult
 from src.core.enums import KMCStatus
-from src.core.config import KMCParams, ALParams
+from src.core.config import KMCParams, ALParams, LJParams
+from src.engines.calculators import SumCalculator
+from src.labeling.calculators.shifted_lj import ShiftedLennardJones
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +44,25 @@ logger = logging.getLogger(__name__)
 # kB in eV/K = k (J/K) / e (J/eV)
 KB_EV = constants.k / constants.e
 
-def _setup_calculator(atoms: Atoms, potential_path: str):
-    """Attach the Pacemaker calculator to the atoms."""
+def _setup_calculator(atoms: Atoms, potential_path: str, lj_params: LJParams, e0_dict: Dict[str, float] = None):
+    """Attach the SumCalculator (ACE + LJ + E0) to the atoms."""
     if PyACECalculator is None:
         if hasattr(atoms, "calc") and atoms.calc is not None:
             return
         raise ImportError("pyace module is required for KMC Engine.")
 
-    calc = PyACECalculator(potential_path)
+    ace_calc = PyACECalculator(potential_path)
+
+    # LJ Baseline
+    lj_calc = ShiftedLennardJones(
+        epsilon=lj_params.epsilon,
+        sigma=lj_params.sigma,
+        rc=lj_params.cutoff,
+        shift_energy=lj_params.shift_energy
+    )
+
+    # Combine
+    calc = SumCalculator(calculators=[ace_calc, lj_calc], e0=e0_dict)
     atoms.calc = calc
 
 if HAS_NUMBA:
@@ -133,9 +146,11 @@ def _bfs_traversal_scipy(
 class OffLatticeKMCEngine(KMCEngine):
     """Off-Lattice KMC Engine with k-step uncertainty checking and Numba optimization."""
 
-    def __init__(self, kmc_params: KMCParams, al_params: ALParams):
+    def __init__(self, kmc_params: KMCParams, al_params: ALParams, lj_params: LJParams, e0_dict: Dict[str, float] = None):
         self.kmc_params = kmc_params
         self.al_params = al_params
+        self.lj_params = lj_params
+        self.e0_dict = e0_dict or {}
 
         if not HAS_NUMBA:
             logger.warning("Numba not installed. Using Scipy fallback for graph traversal.")
@@ -155,8 +170,6 @@ class OffLatticeKMCEngine(KMCEngine):
         if cns[center_idx] >= self.kmc_params.adsorbate_cn_cutoff:
              return [center_idx]
 
-        # For testing, we might patch HAS_NUMBA but _bfs_traversal_numba might not be defined
-        # if actual import failed. So we check existence of function.
         if HAS_NUMBA and '_bfs_traversal_numba' in globals():
             cluster_arr = _bfs_traversal_numba(
                 center_idx,
@@ -257,10 +270,10 @@ class OffLatticeKMCEngine(KMCEngine):
         if not local_moving_indices:
              return KMCResult(status=KMCStatus.NO_EVENT, structure=full_atoms_snapshot, metadata={"reason": "Carving Error"})
 
-        _setup_calculator(cluster, potential_path)
+        _setup_calculator(cluster, potential_path, self.lj_params, self.e0_dict)
 
         search_atoms = cluster.copy()
-        _setup_calculator(search_atoms, potential_path)
+        _setup_calculator(search_atoms, potential_path, self.lj_params, self.e0_dict)
 
         coherent_disp = np.random.normal(0, self.kmc_params.search_radius, 3)
 
@@ -297,11 +310,27 @@ class OffLatticeKMCEngine(KMCEngine):
             try:
                 calc = search_atoms.calc
                 gamma_vals = None
-                if hasattr(calc, "results"):
-                    gamma_vals = calc.results.get('gamma')
-                if gamma_vals is None and hasattr(calc, 'get_property'):
-                    try: gamma_vals = calc.get_property('gamma', search_atoms)
-                    except: pass
+
+                # Check properties depending on which calculator is active
+                # SumCalculator wraps others
+                if hasattr(calc, "calculators"):
+                    for subcalc in calc.calculators:
+                        # We use 'isinstance' which relies on import, but testing mocks modules.
+                        # So isinstance(subcalc, PyACECalculator) might fail if mock is different.
+                        # We check based on class name or if it has 'results'.
+                        if type(subcalc).__name__ == "PyACECalculator" or hasattr(subcalc, 'results'):
+                             if hasattr(subcalc, "results"):
+                                 gamma_vals = subcalc.results.get('gamma')
+                                 if gamma_vals is not None: break
+
+
+                # Fallback if calc is directly PyACECalculator (not SumCalculator)
+                if gamma_vals is None:
+                    if hasattr(calc, "results"):
+                        gamma_vals = calc.results.get('gamma')
+                    if gamma_vals is None and hasattr(calc, 'get_property'):
+                        try: gamma_vals = calc.get_property('gamma', search_atoms)
+                        except: pass
 
                 if gamma_vals is not None:
                     max_gamma = np.max(gamma_vals)
@@ -320,7 +349,7 @@ class OffLatticeKMCEngine(KMCEngine):
 
         if converged:
             product_atoms = search_atoms.copy()
-            _setup_calculator(product_atoms, potential_path)
+            _setup_calculator(product_atoms, potential_path, self.lj_params, self.e0_dict)
 
             prod_opt = FIRE(product_atoms, logfile=None)
             prod_opt.run(fmax=self.kmc_params.dimer_fmax, steps=500)
@@ -359,7 +388,7 @@ class OffLatticeKMCEngine(KMCEngine):
 
     def run_step(self, initial_atoms: Atoms, potential_path: str) -> KMCResult:
         atoms = initial_atoms.copy()
-        _setup_calculator(atoms, potential_path)
+        _setup_calculator(atoms, potential_path, self.lj_params, self.e0_dict)
 
         try:
             opt = FIRE(atoms, logfile=None)
