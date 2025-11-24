@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch, ANY
 from pathlib import Path
 from ase import Atoms
 import numpy as np
+from typing import List, Tuple
 
 from src.sampling.strategies.max_vol import MaxVolSampler
 from src.workflows.orchestrator import ActiveLearningOrchestrator
@@ -25,25 +26,33 @@ def test_max_vol_sampler_missing_kwargs(max_vol_sampler):
     with pytest.raises(ValueError):
         max_vol_sampler.sample(dump_file="dump.lammpstrj")
 
-@patch('src.sampling.strategies.max_vol.read')
+# Updated test to match new streaming implementation
+@patch('src.sampling.strategies.max_vol.iread') # Patched iread instead of read
 @patch('src.sampling.strategies.max_vol.write')
 @patch('src.sampling.strategies.max_vol.subprocess.run')
-def test_max_vol_sampler_success(mock_run, mock_write, mock_read, max_vol_sampler, mock_atoms, tmp_path):
+@patch('builtins.open') # Patch open for the temp file
+def test_max_vol_sampler_success(mock_open, mock_run, mock_write, mock_iread, max_vol_sampler, mock_atoms, tmp_path):
     # Setup mocks
-    mock_read.side_effect = [
-        [mock_atoms], # First read (dump file frames)
-        [mock_atoms]  # Second read (selected frames)
+    # iread is called twice. Once for Pass 1 (reading dump), once for Pass 2 (reading temp extxyz)
+    mock_iread.side_effect = [
+        iter([mock_atoms]), # Pass 1: dump file frames
+        iter([mock_atoms])  # Pass 2: temp file frames
     ]
+
+    # Mock subprocess run to return stdout with index 0
+    mock_run.return_value.stdout = "0\n"
 
     # Mock file existence checks
     with patch('src.sampling.strategies.max_vol.Path.exists', return_value=True):
-         samples = max_vol_sampler.sample(
-             dump_file="dump.lammpstrj",
-             potential_yaml_path="potential.yaml",
-             asi_path="potential.asi",
-             n_clusters=5,
-             elements=["H"]
-         )
+         # Mock unlink to avoid errors
+         with patch('src.sampling.strategies.max_vol.Path.unlink'):
+             samples = max_vol_sampler.sample(
+                 dump_file="dump.lammpstrj",
+                 potential_yaml_path="potential.yaml",
+                 asi_path="potential.asi",
+                 n_clusters=5,
+                 elements=["H"]
+             )
 
     # Verification
     assert len(samples) == 1
@@ -75,7 +84,8 @@ def test_orchestrator_initial_asi_generation(mock_read, mock_exists, mock_mkdir,
             initial_potential="pot.yace", potential_yaml_path="pot.yaml",
             initial_dataset_path="data.pckl", initial_active_set_path=None
         ),
-        dft_params=DFTParams(ecutwfc=30, kpts=(1,1,1), pseudo_dir=".", command="pw.x"),
+        # Updated DFTParams to match definition in config.py
+        dft_params=DFTParams(sssp_json_path="sssp.json", pseudo_dir=".", command="pw.x"),
         lj_params=LJParams(epsilon=1.0, sigma=1.0, cutoff=2.5)
     )
 
