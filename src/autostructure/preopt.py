@@ -1,10 +1,10 @@
 import numpy as np
+from typing import Dict, List, Set, Optional
 from ase import Atoms
 from ase.calculators.calculator import Calculator
 from ase.calculators.emt import EMT
 from ase.calculators.lj import LennardJones
 from ase.optimize import BFGS
-from ase.data import atomic_numbers, covalent_radii
 
 class PreOptimizer:
     """
@@ -17,36 +17,33 @@ class PreOptimizer:
     to maintain compressed cell volumes while relaxing atomic overlaps.
     """
 
-    def __init__(self, fmax=0.1, steps=200, mic_distance=0.8):
+    def __init__(
+        self,
+        lj_params: Dict[str, float],
+        emt_elements: Optional[Set[str]] = None,
+        fmax: float = 0.1,
+        steps: int = 200,
+        mic_distance: float = 0.8
+    ):
         """
         Args:
+            lj_params (Dict[str, float]): LJ parameters (sigma, epsilon, cutoff).
+            emt_elements (Set[str], optional): Elements allowed for EMT.
+                                               Defaults to standard ASE EMT elements.
             fmax (float): Maximum force threshold for relaxation.
             steps (int): Maximum number of relaxation steps.
             mic_distance (float): Minimum interatomic distance threshold (Å) for discarding.
         """
+        self.lj_params = lj_params
         self.fmax = fmax
         self.steps = steps
         self.mic_distance = mic_distance
 
-        # Elements supported by ASE's EMT calculator
-        self.emt_elements = {"Al", "Cu", "Ag", "Au", "Ni", "Pd", "Pt", "C", "N", "O", "H"}
-
-    def _get_lj_parameters(self, atoms: Atoms):
-        """
-        Generate rough Lennard-Jones parameters based on covalent radii.
-        This is not for physical accuracy but for purely repulsive overlap removal.
-        """
-        # Universal coarse parameters
-        # epsilon: depth of the potential well (eV) - kept small to avoid strong binding artifacts
-        # sigma: distance where potential is zero (Å) - roughly 2 * radius
-
-        epsilon = 0.1 # Weak interaction
-
-        radii = [covalent_radii[Z] for Z in atoms.numbers]
-        avg_radius = np.mean(radii)
-        sigma = 2.0 * avg_radius * 0.8909 # sigma is roughly r_min / 2^(1/6)
-
-        return sigma, epsilon
+        # Elements supported by ASE's EMT calculator (Standard set)
+        if emt_elements is None:
+            self.emt_elements = {"Al", "Cu", "Ag", "Au", "Ni", "Pd", "Pt", "C", "N", "O", "H"}
+        else:
+            self.emt_elements = set(emt_elements)
 
     def get_calculator(self, atoms: Atoms) -> Calculator:
         """
@@ -57,10 +54,12 @@ class PreOptimizer:
         if unique_elements.issubset(self.emt_elements):
             return EMT()
         else:
-            # Fallback to LJ
-            sigma, epsilon = self._get_lj_parameters(atoms)
-            # rc cut-off: 3*sigma is standard
-            return LennardJones(epsilon=epsilon, sigma=sigma, rc=3.0*sigma)
+            # Use injected LJ parameters
+            return LennardJones(
+                epsilon=self.lj_params['epsilon'],
+                sigma=self.lj_params['sigma'],
+                rc=self.lj_params['cutoff']
+            )
 
     def run_pre_optimization(self, atoms: Atoms) -> Atoms:
         """
@@ -81,8 +80,9 @@ class PreOptimizer:
         try:
             dyn = BFGS(atoms, logfile=None) # Suppress log output
             dyn.run(fmax=self.fmax, steps=self.steps)
-        except Exception as e:
+        except Exception:
             # If relaxation fails (e.g., explosion), we catch it
+            # But we proceed to check distances. If it exploded, distances might be weird or fine.
             pass
 
         # Final Sanity Check: Distance Matrix

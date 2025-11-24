@@ -1,7 +1,7 @@
 import numpy as np
 import copy
 import random
-from typing import List, Union
+from typing import List, Union, Dict, Optional
 from ase import Atoms
 from pymatgen.core import Structure
 from pymatgen.io.ase import AseAtomsAdaptor
@@ -15,10 +15,15 @@ class InterfaceBuilder(BaseGenerator):
     Modes: Epitaxial Strain Scan, Incoherent/Twist, Gradient Intermix.
     """
 
-    def __init__(self, structure_a: Union[Atoms, Structure], structure_b: Union[Atoms, Structure]):
+    def __init__(
+        self,
+        structure_a: Union[Atoms, Structure],
+        structure_b: Union[Atoms, Structure],
+        lj_params: Optional[Dict[str, float]] = None
+    ):
         # We need two structures. BaseGenerator init takes one.
         # We'll use A as the "base" but store B.
-        super().__init__(structure_a)
+        super().__init__(structure_a, lj_params=lj_params)
 
         if isinstance(structure_b, Atoms):
             self.structure_b = AseAtomsAdaptor.get_structure(structure_b)

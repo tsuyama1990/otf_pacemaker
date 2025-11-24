@@ -23,6 +23,7 @@ def test_config_from_dict_explicit_lj_params():
             "potential_yaml_path": "pot.yaml"
         },
         "dft_params": {
+            "sssp_json_path": "sssp.json",
             "ecutwfc": 50,
             "kpts": [1, 1, 1],
             "pseudo_dir": ".",
@@ -32,13 +33,17 @@ def test_config_from_dict_explicit_lj_params():
             "epsilon": 0.5,
             "sigma": 2.0,
             "cutoff": 5.0
-        }
+        },
+        "seed": 123
     }
 
     config = Config.from_dict(config_dict)
     assert config.lj_params.epsilon == 0.5
     assert config.lj_params.sigma == 2.0
     assert config.lj_params.cutoff == 5.0
+    assert config.seed == 123
+    # Check that extra keys were filtered (no error raised)
+    assert config.dft_params.sssp_json_path == "sssp.json"
 
 def test_config_from_dict_generated_lj_params():
     elements = ["Cu", "Ni"]
@@ -61,6 +66,7 @@ def test_config_from_dict_generated_lj_params():
             "potential_yaml_path": "pot.yaml"
         },
         "dft_params": {
+            "sssp_json_path": "sssp.json",
             "ecutwfc": 50,
             "kpts": [1, 1, 1],
             "pseudo_dir": ".",
@@ -87,6 +93,7 @@ def test_config_from_dict_generated_lj_params():
     # on .5 boundaries (Banker's rounding vs standard rounding)
     assert abs(config.lj_params.sigma - expected_sigma) < 1e-3
     assert abs(config.lj_params.cutoff - expected_cutoff) < 2e-3
+    assert config.seed == 42 # Default
 
 def test_config_fails_if_no_elements_and_no_lj_params():
     config_dict = {
@@ -108,6 +115,7 @@ def test_config_fails_if_no_elements_and_no_lj_params():
             "potential_yaml_path": "pot.yaml"
         },
         "dft_params": {
+            "sssp_json_path": "sssp.json",
             "ecutwfc": 50,
             "kpts": [1, 1, 1],
             "pseudo_dir": ".",

@@ -1,4 +1,4 @@
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Dict
 from ase import Atoms
 from pymatgen.core import Structure
 
@@ -9,6 +9,7 @@ from .covalent import CovalentGenerator
 from .molecular import MolecularGenerator
 from .interface import InterfaceBuilder
 from .preopt import PreOptimizer
+from src.core.config import Config
 
 class AutoStructureBuilder:
     """
@@ -16,8 +17,25 @@ class AutoStructureBuilder:
     Automatically selects and executes generation strategies.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, config: Optional[Config] = None, api_key: Optional[str] = None):
+        """
+        Args:
+            config (Config, optional): Global configuration containing LJ params, etc.
+            api_key (str, optional): MP API Key.
+        """
         self.intelligence = MaterialIntelligence(api_key=api_key)
+        self.config = config
+
+        # Extract LJ params or use defaults
+        if self.config:
+            self.lj_params = {
+                "epsilon": self.config.lj_params.epsilon,
+                "sigma": self.config.lj_params.sigma,
+                "cutoff": self.config.lj_params.cutoff
+            }
+        else:
+            # Fallback (Should be avoided)
+            self.lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
 
     def generate(self, structure: Union[Atoms, Structure], formula_or_id: Optional[str] = None) -> List[Atoms]:
         """
@@ -39,25 +57,22 @@ class AutoStructureBuilder:
 
         # 1. Classify
         mat_type = self.intelligence.analyze(pmg_struct, formula_or_id)
-        # Determine Tm factor if needed (passed to generators via config potentially)
 
         generators = []
 
         # 2. Select Strategies
-        # Note: A material can trigger multiple strategies (e.g. Ionic + Covalent for some oxides)
-        # But for now we pick the primary one.
-
+        # Inject lj_params into generators
         if mat_type == MaterialType.IONIC:
-            generators.append(IonicGenerator(pmg_struct))
+            generators.append(IonicGenerator(pmg_struct, lj_params=self.lj_params))
         elif mat_type == MaterialType.ALLOY:
-            generators.append(AlloyGenerator(pmg_struct))
+            generators.append(AlloyGenerator(pmg_struct, lj_params=self.lj_params))
         elif mat_type == MaterialType.COVALENT:
-            generators.append(CovalentGenerator(pmg_struct))
+            generators.append(CovalentGenerator(pmg_struct, lj_params=self.lj_params))
         elif mat_type == MaterialType.MOLECULAR:
-            generators.append(MolecularGenerator(pmg_struct))
+            generators.append(MolecularGenerator(pmg_struct, lj_params=self.lj_params))
         else:
-            # Default fallback: Treat as Alloy (Random/Chaos is good for learning) + Covalent (Distortion)
-            generators.append(AlloyGenerator(pmg_struct))
+            # Default fallback
+            generators.append(AlloyGenerator(pmg_struct, lj_params=self.lj_params))
 
         # 3. Execute
         results = []
@@ -72,5 +87,5 @@ class AutoStructureBuilder:
         """
         Explicitly builds interface structures between two materials.
         """
-        builder = InterfaceBuilder(struct_a, struct_b)
+        builder = InterfaceBuilder(struct_a, struct_b, lj_params=self.lj_params)
         return builder.generate_all()

@@ -134,7 +134,13 @@ class TestSeedGenerationPipeline(unittest.TestCase):
     @patch('src.workflows.seed_generation.PacemakerTrainer')
     @patch('src.workflows.seed_generation.Espresso') # Mock calculator init
     @patch('src.workflows.seed_generation.shutil')
-    def test_main(self, mock_shutil, mock_espresso, mock_trainer_cls, mock_labeler_cls,
+    @patch('src.workflows.seed_generation.load_sssp_database')
+    @patch('src.workflows.seed_generation.calculate_cutoffs')
+    @patch('src.workflows.seed_generation.get_pseudopotentials_dict')
+    @patch('src.workflows.seed_generation.validate_pseudopotentials')
+    @patch('src.workflows.seed_generation.calculate_kpoints')
+    def test_main(self, mock_calc_kpts, mock_val_pseudo, mock_get_pseudo, mock_calc_cut, mock_load_sssp,
+                  mock_shutil, mock_espresso, mock_trainer_cls, mock_labeler_cls,
                   mock_sampler_cls, mock_filter_cls, mock_gen_cls, mock_config_cls):
 
         # Setup Config
@@ -144,6 +150,7 @@ class TestSeedGenerationPipeline(unittest.TestCase):
         mock_config.dft_params.kpts = [1,1,1]
         mock_config.dft_params.pseudo_dir = "."
         mock_config.dft_params.ecutwfc = 30.0
+        mock_config.dft_params.sssp_json_path = "sssp.json"
         mock_config.lj_params.epsilon = 1.0
         mock_config.lj_params.sigma = 1.0
         mock_config.lj_params.cutoff = 2.5
@@ -170,6 +177,12 @@ class TestSeedGenerationPipeline(unittest.TestCase):
         mock_trainer = mock_trainer_cls.return_value
         mock_trainer.prepare_dataset.return_value = "temp_data.pckl"
         mock_trainer.train.return_value = "temp_pot.yace"
+
+        # Mock SSSP loader
+        mock_load_sssp.return_value = {}
+        mock_calc_cut.return_value = (30.0, 120.0)
+        mock_get_pseudo.return_value = {'Al': 'Al.upf'}
+        mock_calc_kpts.return_value = ([3,3,3], [1,1,1])
 
         # Run main
         # We need to mock sys.argv

@@ -6,11 +6,13 @@ It uses Python's standard dataclasses for definition and PyYAML for loading from
 
 import yaml
 import numpy as np
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, List, Dict
 from ase.data import atomic_numbers, covalent_radii  # REQUIRED for physics-based defaults
 
+logger = logging.getLogger(__name__)
 
 def generate_default_lj_params(elements: List[str]) -> Dict[str, float]:
     """
@@ -149,6 +151,7 @@ class Config:
     al_params: ALParams
     dft_params: DFTParams
     lj_params: LJParams
+    seed: int = 42  # Global random seed
     kmc_params: KMCParams = field(default_factory=KMCParams)
     generation_params: GenerationParams = field(default_factory=GenerationParams)
 
@@ -176,19 +179,61 @@ class Config:
             lj_dict = generate_default_lj_params(elements)
         # --------------------------
 
+        # Clean DFT Params (Remove unsupported keys like 'ecutwfc', 'kpts')
+        # DFTParams only accepts: sssp_json_path, pseudo_dir, command, kpoint_density
+        dft_dict = config_dict.get("dft_params", {}).copy()
+        allowed_dft_keys = {"sssp_json_path", "pseudo_dir", "command", "kpoint_density"}
+        dft_dict = {k: v for k, v in dft_dict.items() if k in allowed_dft_keys}
+
         return cls(
             md_params=MDParams(**md_dict),
             al_params=ALParams(**config_dict.get("al_params", {})),
             kmc_params=KMCParams(**config_dict.get("kmc_params", {})),
-            dft_params=DFTParams(**config_dict.get("dft_params", {})),
+            dft_params=DFTParams(**dft_dict),
             lj_params=LJParams(**lj_dict),
-            generation_params=generation_params
+            generation_params=generation_params,
+            seed=config_dict.get("seed", 42)
         )
 
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Config":
-        """Load configuration from a YAML file."""
+        """Load configuration from YAML file(s).
+
+        Automatically looks for 'constant.yaml' in the same directory
+        and merges it with the main config.
+        """
         path = Path(config_path)
+
+        # 1. Load Main Config
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+
         with path.open("r", encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f)
+            config_dict = yaml.safe_load(f) or {}
+
+        # 2. Load Constants (if exists)
+        constant_path = path.parent / "constant.yaml"
+        if constant_path.exists():
+            logger.info(f"Loading constants from {constant_path}")
+            with constant_path.open("r", encoding="utf-8") as f:
+                constant_dict = yaml.safe_load(f) or {}
+
+            # Merge constants into config_dict (Deep Merge)
+            # Strategy: Config overrides Constants? Or Constants are separate?
+            # Usually Constants are defaults/reference. Config is user override.
+            # So we start with constant_dict and update with config_dict.
+
+            merged_dict = constant_dict.copy()
+
+            def update_recursive(d, u):
+                for k, v in u.items():
+                    if isinstance(v, dict):
+                        d[k] = update_recursive(d.get(k, {}), v)
+                    else:
+                        d[k] = v
+                return d
+
+            update_recursive(merged_dict, config_dict)
+            config_dict = merged_dict
+
         return cls.from_dict(config_dict)

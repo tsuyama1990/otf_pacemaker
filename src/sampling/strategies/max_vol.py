@@ -59,21 +59,21 @@ class MaxVolSampler(Sampler):
             # --- Pass 1: Streaming Conversion & Accumulation ---
             logger.info("Starting Pass 1: Streaming conversion from LAMMPS dump to extxyz.")
             count = 0
+
+            # Using ase.io.iread is memory efficient, but we need to write to a single file for pace_select.
+            # We open the file once and append frames.
             with open(temp_extxyz, "w") as f_out:
-                # Iterate over the dump file frame by frame
-                for atoms in iread(dump_path, index=":", format="lammps-dump-text"):
+                # Iterate over the dump file frame by frame using generator
+                for atoms in iread(str(dump_path), index=":", format="lammps-dump-text", parallel=False):
                     # Apply element mapping
                     self._assign_symbols(atoms, elements)
                     # Write to temporary file
-                    write(f_out, atoms, format="extxyz")
+                    write(f_out, atoms, format="extxyz", append=True)
                     count += 1
 
             logger.info(f"Pass 1 complete. Processed {count} frames.")
 
             # --- External Execution: pace_select ---
-            # We assume pace_select writes selected indices to stdout
-            # The prompt says: "Capture the standard output to get the list of selected frame indices"
-
             cmd = [
                 self.cmd,
                 "-p", potential_yaml_path,
@@ -84,6 +84,9 @@ class MaxVolSampler(Sampler):
 
             logger.info(f"Running pace_select: {' '.join(cmd)}")
             try:
+                # Capture stdout directly without buffering entire output in memory if possible?
+                # subprocess.run with capture_output=True loads all into memory.
+                # Since pace_select output is just indices, it's small. Safe to capture.
                 result = subprocess.run(cmd, check=True, capture_output=True, text=True)
                 stdout = result.stdout.strip()
             except subprocess.CalledProcessError as e:
@@ -114,20 +117,36 @@ class MaxVolSampler(Sampler):
             logger.info("Starting Pass 2: Extraction of selected frames.")
 
             # Stream the temporary extxyz file from the beginning
-            for i, atoms in enumerate(iread(temp_extxyz, index=":", format="extxyz")):
-                if i in selected_indices:
-                    # Identify Max Gamma Atom
-                    idx = self._find_max_gamma_index(atoms)
-                    results.append((atoms, idx))
+            # Using iread again avoids loading all frames.
+            # We need to match indices. iread yields in order.
 
-                    # Optimization (Early Exit)
-                    if len(results) == len(selected_indices):
-                        logger.info("All selected structures retrieved. Exiting early.")
+            current_idx = 0
+            # Sort selected indices to match stream order
+            sorted_indices = sorted(list(selected_indices))
+
+            # Optimization: Use an iterator and advance it
+            extxyz_iter = iread(str(temp_extxyz), index=":", format="extxyz", parallel=False)
+
+            for target_idx in sorted_indices:
+                # Advance iterator to target_idx
+                while current_idx < target_idx:
+                    try:
+                        next(extxyz_iter)
+                        current_idx += 1
+                    except StopIteration:
                         break
 
-                # Safety break if we passed the max required index (though usually len check covers this)
-                if i > max_index:
-                     break
+                if current_idx == target_idx:
+                    try:
+                        atoms = next(extxyz_iter)
+                        idx = self._find_max_gamma_index(atoms)
+                        results.append((atoms, idx))
+                        current_idx += 1
+                    except StopIteration:
+                        break
+                else:
+                    # If we exhausted iterator before reaching target
+                    break
 
             return results
 
@@ -142,20 +161,12 @@ class MaxVolSampler(Sampler):
 
     def _assign_symbols(self, atoms: Atoms, elements: List[str]):
         """Assign chemical symbols based on type IDs."""
-        # Note: ASE's lammpsrun might consume 'type' column and set atomic numbers.
-        # If 'type' is missing, check if we can infer it or rely on existing behavior.
-        # However, for correct mapping, we need the original type IDs.
-
         types = None
         if 'type' in atoms.arrays:
              types = atoms.get_array('type')
         else:
-             # Fallback: if 'type' is not in arrays, check if we can use atomic numbers
-             # assuming simple 1->1 mapping (H->1, He->2, etc.) which ASE does by default for types 1, 2...
-             # This is risky but standard ASE behavior for unknown types.
+             # Fallback
              logger.debug(f"Type array missing. Current symbols: {atoms.get_chemical_symbols()}. Trying to infer from numbers.")
-             # For types 1, 2... ASE assigns atomic numbers 1, 2...
-             # So we can treat atomic numbers as types.
              types = atoms.numbers
 
         if types is not None:

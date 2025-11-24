@@ -1,41 +1,169 @@
+# -----------------------------------------------------------------------------
+# User Configuration File (config.yaml)
+# ユーザー設定ファイル
+# シミュレーションの条件や実行環境に依存するパスなどを設定します。
+# -----------------------------------------------------------------------------
+
+# ・MDシミュレーションパラメータ
+#   Molecular Dynamics (MD) の実行条件を設定します。
 md_params:
-  timestep: 0.001
+  # ・タイムステップ (fs)
+  #   MD積分の時間刻み。
+  #   推奨範囲: 0.5 - 2.0
+  #   デフォルト: 1.0
+  timestep: 1.0
+
+  # ・温度 (K)
+  #   シミュレーションの目標温度。
+  #   設定範囲: > 0
+  #   デフォルト: 300.0
   temperature: 300.0
-  pressure: 0.0
+
+  # ・圧力 (bar)
+  #   NPTアンサンブルの場合の目標圧力。
+  #   デフォルト: 1.0 (大気圧)
+  #   ※ 現在の実装ではNVTが主ですが、将来的な拡張のために予約されています。
+  pressure: 1.0
+
+  # ・MDステップ数
+  #   1回のMDブロックで実行するステップ数。
+  #   推奨範囲: 1000 - 100000
+  #   デフォルト: 10000
   n_steps: 10000
+
+  # ・元素リスト
+  #   系に含まれる元素記号のリスト。
+  #   例: ["Al", "Cu"], ["Si", "O"]
   elements: ["Al", "Cu"]
-  initial_structure: "data/initial.xyz"
+
+  # ・初期構造ファイルパス
+  #   MDを開始する初期構造ファイル (LAMMPS data format推奨)。
+  #   例: "initial.data"
+  initial_structure: "initial.data"
+
+  # ・原子質量辞書
+  #   各元素の質量 (g/mol)。LAMMPSのmass設定に使用されます。
   masses:
     Al: 26.98
     Cu: 63.55
+
+  # ・リスタートファイル出力頻度
+  #   restart.chk を書き出すステップ間隔。
+  #   デフォルト: 1000
   restart_freq: 1000
+
+  # ・ダンプファイル出力頻度
+  #   dump.lammpstrj を書き出すステップ間隔。
+  #   デフォルト: 1000
   dump_freq: 1000
-  lammps_command: "/home/tomo/project/otf_pacemaker/mylammps/build/lmp"
 
+  # ・LAMMPS実行コマンド
+  #   LAMMPSを実行するためのシェルコマンド。MPI並列などを指定可能。
+  #   例: "lmp_serial", "mpirun -np 4 lmp_mpi"
+  #   デフォルト: "lmp_serial"
+  lammps_command: "lmp_serial"
+
+# ・アクティブラーニングパラメータ
+#   能動学習 (Active Learning) の閾値やサンプリング戦略を設定します。
 al_params:
+  # ・不確実性閾値 (Gamma)
+  #   外挿グレード (Gamma) がこの値を超えた場合、MDを中断して再学習を行います。
+  #   推奨範囲: 0.05 - 0.3 (ACEポテンシャルの場合)
+  #   デフォルト: 0.1
   gamma_threshold: 0.1
+
+  # ・クラスタサンプリング数
+  #   不確実性が高い構造からサンプリングする数。
+  #   推奨範囲: 1 - 20
+  #   デフォルト: 5
   n_clusters: 5
-  r_core: 4.5
-  box_size: 10.0
-  initial_potential: "data/seed/seed_potential.yace"
-  potential_yaml_path: "data/potential.yaml"
-  stoichiometry_tolerance: 0.1
-  min_bond_distance: 2.0
-  num_parallel_labeling: 6  # Run 6 DFT jobs in parallel (6 × 4 cores = 24 cores total)
-  query_strategy: "uncertainty"
 
+  # ・コア半径 (Angstrom)
+  #   構造切り出し時に中心原子から「コア」として扱う半径。緩和時に固定されません。
+  #   推奨範囲: 3.0 - 6.0
+  #   デフォルト: 4.0
+  r_core: 4.0
+
+  # ・ボックスサイズ (Angstrom)
+  #   切り出すスモールセルの立方体の一辺の長さ。
+  #   推奨範囲: 8.0 - 15.0 (相互作用カットオフの2倍以上推奨)
+  #   デフォルト: 12.0
+  box_size: 12.0
+
+  # ・初期ポテンシャルパス
+  #   シミュレーション開始時に使用する学習済みポテンシャルファイル (.yace)。
+  #   存在しない場合、Phase 1 (Seed Generation) がトリガーされます。
+  initial_potential: "potential.yace"
+
+  # ・ポテンシャルYAML定義ファイル
+  #   ACEポテンシャルの基底関数セットなどを定義したYAMLファイル。
+  potential_yaml_path: "potential.yaml"
+
+  # ・初期データセットパス (Optional)
+  #   初期学習に使用するデータセット (.pckl, .xyz 等)。
+  #   Seed Generation をスキップして既存データから始める場合に指定します。
+  initial_dataset_path: "dataset.pckl"
+
+  # ・並列ラベリング数
+  #   DFT計算を並列実行する際のプロセス数。
+  #   計算リソースに応じて調整してください。
+  #   デフォルト: 4
+  num_parallel_labeling: 4
+
+# ・KMCシミュレーションパラメータ
+#   Kinetic Monte Carlo (kMC) の実行条件。MDと併用する場合に設定します。
+kmc_params:
+  # ・KMC有効化フラグ
+  #   kMCを実行するかどうか。
+  #   デフォルト: false
+  active: false
+
+  # ・KMC温度 (K)
+  #   遷移レート計算に使用する温度。MD温度と同じか、加速試験用に高く設定します。
+  #   デフォルト: 300.0
+  temperature: 300.0
+
+  # ・探索回数
+  #   1回のkMCステップで並列探索するサドル点の数（ターゲット原子数）。
+  #   デフォルト: 10
+  n_searches: 10
+
+  # ・ワーカー数
+  #   並列探索を実行するプロセス数。
+  #   デフォルト: 4
+  n_workers: 4
+
+  # ・活性種リスト
+  #   kMCの探索対象とする元素。表面原子や吸着原子を指定します。
+  #   例: ["Cu"], ["O"]
+  active_species: ["Cu"]
+
+# ・DFT計算パラメータ
+#   Quantum Espresso (QE) を用いたラベリング計算の設定です。
 dft_params:
-  sssp_json_path: "/home/tomo/qe_calc/pp_precision/SSSP_1.3.0_PBE_precision.json"
-  pseudo_dir: "/home/tomo/qe_calc/pp_precision"
-  command: "/opt/intel/oneapi/mpi/2021.13/bin/mpirun -np 10 /home/tomo/pkgs/qe-7.3.1/bin/pw.x"
-  kpoint_density: 60  # Å, for high precision k-point grid (SSSP standard)
+  # ・SSSP JSONデータベースパス
+  #   擬ポテンシャルのメタデータ (SSSP Precision/Efficiency) が記述されたJSONファイル。
+  #   必須項目
+  sssp_json_path: "SSSP_1.3.0_PBE_precision.json"
 
+  # ・擬ポテンシャルディレクトリ
+  #   UPFファイルが格納されているディレクトリ。
+  #   必須項目
+  pseudo_dir: "./pseudos"
+
+  # ・QE実行コマンド
+  #   pw.x を実行するためのコマンド。MPI設定を含めます。
+  #   例: "mpirun -np 4 pw.x", "pw.x"
+  #   必須項目
+  command: "mpirun -np 4 pw.x"
+
+  # ・K点密度 (Angstrom)
+  #   K点グリッドを生成する際の密度。値が小さいほど高精度（密なグリッド）。
+  #   推奨範囲: 0.15 - 0.25
+  #   デフォルト: 0.15
+  kpoint_density: 0.15
+
+# ・構造生成シナリオ (Optional)
+#   Seed Generation フェーズで使用する構造生成レシピのリスト。
 generation:
-  device: "cuda"  # Device for MACE filtering (cuda/cpu)
-  pre_optimization:
-    enabled: false
-    model: "medium"
-    fmax: 0.1
-    steps: 50
-    device: "cuda"
   scenarios: []

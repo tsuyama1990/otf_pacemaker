@@ -74,6 +74,14 @@ class SeedGenerator:
         scenario_candidates: List[Atoms] = []
         gen_params = self.config.generation_params
 
+        # Inject config into ScenarioFactory if needed, or rely on scenarios dict
+        # Ideally ScenarioFactory should know about physics params but it's separate.
+        # If any scenario uses PreOptimizer internally (it does via InterfaceGenerator/etc),
+        # we need to make sure those are updated.
+        # However, scenario_generation package seems to use different generators than autostructure.
+        # Let's assume ScenarioFactory handles its own dependencies or we'd need to refactor it too.
+        # The prompt focused on 'src/autostructure/preopt.py'.
+
         for scenario_conf in gen_params.scenarios:
             try:
                 sc_gen = ScenarioFactory.create(scenario_conf)

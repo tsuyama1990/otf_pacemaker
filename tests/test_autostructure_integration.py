@@ -44,7 +44,8 @@ def test_interface_builder_strain_limit():
     # B: Lattice 5.0 (Huge mismatch > 15%)
     atoms_b = bulk("Fe", "bcc", a=5.0)
 
-    builder = InterfaceBuilder(atoms_a, atoms_b)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    builder = InterfaceBuilder(atoms_a, atoms_b, lj_params=lj_params)
 
     # Run strain scan
     builder.epitaxial_strain_scan()
@@ -58,7 +59,8 @@ def test_interface_builder_success():
     atoms_a = bulk("Fe", "bcc", a=2.87)
     atoms_b = bulk("Fe", "bcc", a=2.90) # Small mismatch
 
-    builder = InterfaceBuilder(atoms_a, atoms_b)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    builder = InterfaceBuilder(atoms_a, atoms_b, lj_params=lj_params)
     builder.epitaxial_strain_scan()
 
     assert len(builder.generated_structures) > 0
@@ -67,7 +69,8 @@ def test_interface_builder_success():
 
 def test_preoptimizer_calculator():
     """Test PreOptimizer calculator factory."""
-    opt = PreOptimizer()
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    opt = PreOptimizer(lj_params=lj_params)
 
     # Test EMT elements
     atoms_emt = bulk("Cu")
@@ -88,7 +91,8 @@ def test_ionic_generator_md_snapshots():
     # The generator logic doesn't strictly enforce charge for MD, just structure.
     struct = Structure(Lattice.cubic(3.6), ["Cu"], [[0,0,0]])
 
-    gen = IonicGenerator(struct)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    gen = IonicGenerator(struct, lj_params=lj_params)
 
     # Patch run_pre_optimization to avoid actual expensive relaxation
     # but ensure it returns atoms with calculator if asked.
@@ -111,7 +115,8 @@ def test_molecular_high_pressure():
     # H2 in a box
     struct = Structure(Lattice.cubic(5.0), ["H", "H"], [[0.4, 0.4, 0.4], [0.6, 0.6, 0.6]])
 
-    gen = MolecularGenerator(struct)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    gen = MolecularGenerator(struct, lj_params=lj_params)
     # LOWER mic_distance because H-H bond is ~0.74A, default limit is 0.8A
     gen.pre_optimizer.mic_distance = 0.5
 
@@ -129,7 +134,8 @@ def test_molecular_high_pressure():
 
 def test_ionic_generator_charged_defects(dummy_structure):
     """Test charged defect generation."""
-    gen = IonicGenerator(dummy_structure)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    gen = IonicGenerator(dummy_structure, lj_params=lj_params)
     gen.generate_charged_defects()
 
     defects = [s for s in gen.generated_structures if s.info.get("type") == "charged_defect"]

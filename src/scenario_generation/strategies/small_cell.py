@@ -2,7 +2,7 @@
 
 import logging
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional, List
 from ase import Atoms
 from ase.constraints import ExpCellFilter, FixAtoms
 from ase.optimize import FIRE
@@ -17,6 +17,7 @@ except ImportError:
         pass # Will raise usually if not available during init or use
 
 from src.core.interfaces import StructureGenerator
+from src.autostructure.preopt import PreOptimizer
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ class SmallCellGenerator(StructureGenerator):
         lammps_cmd: str = "lmp_serial",
         min_bond_distance: float = 1.5,
         stoichiometry_tolerance: float = 0.1,
+        lj_params: Optional[Dict[str, float]] = None,
+        elements: Optional[List[str]] = None
     ):
         """Initialize the SmallCellGenerator.
 
@@ -41,6 +44,8 @@ class SmallCellGenerator(StructureGenerator):
             lammps_cmd: Command to run LAMMPS.
             min_bond_distance: Minimum bond distance for overlap removal.
             stoichiometry_tolerance: Tolerance for stoichiometry check.
+            lj_params: Optional LJ params for PreOptimizer (if needed).
+            elements: Optional list of elements for PreOptimizer (if needed).
         """
         self.r_core = r_core
         self.box_size = box_size
@@ -48,6 +53,14 @@ class SmallCellGenerator(StructureGenerator):
         self.lammps_cmd = lammps_cmd
         self.min_bond_distance = min_bond_distance
         self.stoichiometry_tolerance = stoichiometry_tolerance
+
+        # Initialize PreOptimizer if params provided (optional enhancement)
+        # SmallCellGenerator mainly uses ACE potential for relaxation,
+        # but could use PreOptimizer for initial cleanup if desired.
+        # Currently kept for compatibility with Factory injection.
+        self.pre_optimizer = None
+        if lj_params:
+            self.pre_optimizer = PreOptimizer(lj_params=lj_params, emt_elements=set(elements) if elements else None)
 
     def generate_cell(self, large_atoms: Atoms, center_id: int, potential_path: str) -> Atoms:
         """Generate and relax a small periodic cell around a center atom.

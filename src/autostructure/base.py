@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 from ase import Atoms
 from pymatgen.io.ase import AseAtomsAdaptor
 from pymatgen.core import Structure
@@ -15,7 +15,11 @@ class BaseGenerator(ABC):
     Abstract base class for all structure generators.
     """
 
-    def __init__(self, base_structure: Union[Atoms, Structure]):
+    def __init__(
+        self,
+        base_structure: Union[Atoms, Structure],
+        lj_params: Optional[Dict[str, float]] = None
+    ):
         if isinstance(base_structure, Atoms):
             self.structure = AseAtomsAdaptor.get_structure(base_structure)
         else:
@@ -23,7 +27,13 @@ class BaseGenerator(ABC):
 
         self.generated_structures: List[Atoms] = []
         self.config: Dict[str, Any] = {}
-        self.pre_optimizer = PreOptimizer()
+
+        # Use provided LJ params or safe defaults if not provided (legacy support)
+        if lj_params is None:
+            # Fallback (Should be avoided by proper injection)
+            lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+
+        self.pre_optimizer = PreOptimizer(lj_params=lj_params)
 
     def _add_structure(self, struct: Union[Structure, Atoms], meta: Dict[str, Any] = None):
         """Helper to convert, relax, and store structure."""
