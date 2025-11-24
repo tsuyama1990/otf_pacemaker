@@ -98,9 +98,9 @@ $$ F_{target} = F_{DFT} - F_{LJ} $$
 
 Training is performed using **Pacemaker** via the `PacemakerTrainer` class in `src/training/strategies/pacemaker.py`.
 
+-   **Pass-Through Configuration**: The system acts as a thin wrapper around Pacemaker. You can configure the potential architecture, loss weights, and fitting parameters directly in `config.yaml` under the `ace_model` section. The trainer handles file generation (`input.yaml`) and data management.
 -   **Active Set Management**: Before retraining, the Basis Set (`.asi` file) is updated using `pace_activeset` to include new chemical environments.
--   **Fine-Tuning**: Retraining typically starts from the previous potential (Warm Start) to accelerate convergence.
--   **Output**: Produces a `.yace` (YAML ACE) potential file used by LAMMPS.
+-   **Multi-Stage Learning**: Supports transfer learning or mixing multiple base potentials by specifying a list of `initial_potentials` in the config.
 
 ---
 
@@ -131,27 +131,77 @@ The core workflow is orchestrated by `ActiveLearningOrchestrator` in `src/workfl
 
 ## Usage
 
-1.  **Activate Environment**:
-    ```bash
-    source .venv/bin/activate
-    ```
+### 1. Activate Environment
+```bash
+source .venv/bin/activate
+```
 
-2.  **Configure**:
-    Edit `config.yaml` to set your system parameters (elements, temperature, DFT settings).
+### 2. Configure (Drag & Drop)
+This system separates **Physical/Experiment** settings from **Infrastructure/Environment** settings to maximize portability.
 
-3.  **Run**:
-    ```bash
-    # Runs the main active learning loop
-    # Automatically runs Seed Generation if needed
-    python src/main.py
-    ```
+*   **Experiment Config (`config.yaml`)**: Defines physics (Temperature, Elements), Model Architecture (Pacemaker settings), and Experiment Metadata.
+*   **Meta Config (`meta_config.yaml`)**: Defines environment paths (DFT executables, Pseudo directories) that change from machine to machine.
 
-4.  **Output**:
-    -   `data/seed/`: Initial training data and potential.
-    -   `data/iteration_X/`: Data for each AL cycle (MD dumps, trained potentials, logs).
+Edit these files or simply drop in your preferred versions.
+
+### 3. Run
+You can specify configuration paths via CLI arguments.
+
+```bash
+# Run with default configs (config.yaml, meta_config.yaml)
+python src/main.py
+
+# Run with specific configs (Drag & Drop equivalent)
+python src/main.py --config experiments/exp01.yaml --meta env/workstation.yaml
+```
+
+### 4. Experiment Output
+The system automatically creates an experiment directory defined in `config.yaml` (`experiment.output_dir`).
+
+-   **Reproducibility**: `config.yaml` and `meta_config.yaml` are **automatically backed up** to this directory at the start of the run.
+-   **Artifacts**:
+    -   `data/`: Training data and potentials.
+    -   `logs/`: detailed logs.
     -   `training_log.csv`: Metrics (RMSE, Gamma, Active Set Size).
 
 ---
+
+## Configuration
+
+### Example `config.yaml` (Physics & Model)
+```yaml
+experiment:
+  name: "Al-Cu-Sintering"
+  output_dir: "output/run_001"
+
+ace_model:
+  pacemaker_config:
+    cutoff: 7.0
+    potential:
+      elements: ["Al", "Cu"]
+      bonds:
+        N: 3
+        max_deg: 6
+    fitting:
+      weighting:
+        energy: 100.0
+        force: 1.0
+
+md_params:
+  timestep: 1.0
+  temperature: 600.0
+```
+
+### Example `meta_config.yaml` (Environment)
+```yaml
+dft:
+  command: "mpirun -np 32 pw.x"
+  pseudo_dir: "/opt/pseudos"
+  sssp_json_path: "/opt/pseudos/SSSP_precision.json"
+
+lammps:
+  command: "lmp_mpi"
+```
 
 ---
 
@@ -182,79 +232,13 @@ The JSON metadata file (`SSSP_1.3.0_PBE_precision.json`) contains:
 ### 2. Configure SSSP in config.yaml
 
 ```yaml
-dft_params:
+# In meta_config.yaml
+dft:
   sssp_json_path: "/home/tomo/qe_calc/pp_precision/SSSP_1.3.0_PBE_precision.json"
   pseudo_dir: "/home/tomo/qe_calc/pp_precision"
   command: "mpirun -np 4 pw.x"
+
+# In config.yaml
+dft_params:
   kpoint_density: 60  # Å, for high precision (SSSP standard)
-```
-
-### 3. Automatic Features
-
-#### Pseudopotential Selection
-- Automatically loads correct PP files for each element from SSSP database
-- For compounds (e.g., Al-Cu), uses `max(ecutwfc)` and `max(ecutrho)` across all elements
-- Validates PP files exist and optionally checks MD5 checksums
-
-#### K-point Density Calculation
-Uses the **k-point density approach** instead of fixed grids:
-
-**Formula**: `L × N ≈ kpoint_density` (default: 60 Å for high precision)
-
-Where:
-- `L` = cell lattice vector length
-- `N` = number of k-points along that direction
-
-**Examples**:
-| Cell Size | Calculation | K-grid |
-|-----------|-------------|--------|
-| 3 Å (primitive) | 60/3 = 20 | 20×20×20 |
-| 10 Å (supercell) | 60/10 = 6 | 6×6×6 |
-| 20 Å (large cell) | 60/20 = 3 | 3×3×3 |
-
-**Benefits**:
-- Consistent accuracy across different cell sizes
-- Automatic adaptation for unit cells and supercells
-- Standard approach for MLIP dataset generation
-
-**K-point Settings**:
-- Grid type: Monkhorst-Pack
-- Shift: [1, 1, 1] (includes Γ-point)
-- Calculated per-structure based on cell dimensions
-
-### 4. Adjusting K-point Density
-
-Modify `kpoint_density` in `config.yaml` based on your accuracy needs:
-
-```yaml
-dft_params:
-  kpoint_density: 40   # Lower precision, faster (efficiency mode)
-  kpoint_density: 60   # High precision (SSSP standard, recommended)
-  kpoint_density: 80   # Very high precision (convergence tests)
-```
-
----
-
-## Configuration
-
-The `config.yaml` file controls all aspects of the simulation.
-
-```yaml
-md_params:
-  elements: ["Ag", "Pd"]
-  temperature: 300.0
-  n_steps: 100000
-
-al_params:
-  gamma_threshold: 2.0  # Uncertainty limit
-  initial_potential: "data/seed/seed_potential.yace"
-
-kmc_params:
-  active: true          # Enable Hybrid MD-kMC
-  n_workers: 4          # Parallel saddle searches
-  temperature: 300.0
-
-dft_params:
-  command: "pw.x -in espresso.pwi > espresso.pwo"
-  pseudo_dir: "/path/to/pseudos"
 ```
