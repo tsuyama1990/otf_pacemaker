@@ -1,9 +1,18 @@
 
 import pytest
-from src.core.config import Config, LJParams, MDParams
+from src.core.config import Config, LJParams, MDParams, MetaConfig
 from ase.data import covalent_radii, atomic_numbers
+from pathlib import Path
 
-def test_config_from_dict_explicit_lj_params():
+# Create a dummy meta config for testing
+@pytest.fixture
+def dummy_meta_config():
+    return MetaConfig(
+        dft={"command": "pw.x", "pseudo_dir": ".", "sssp_json_path": "sssp.json"},
+        lammps={"command": "lmp_serial"}
+    )
+
+def test_config_from_dict_explicit_lj_params(dummy_meta_config):
     config_dict = {
         "md_params": {
             "timestep": 1.0,
@@ -23,11 +32,8 @@ def test_config_from_dict_explicit_lj_params():
             "potential_yaml_path": "pot.yaml"
         },
         "dft_params": {
-            "sssp_json_path": "sssp.json",
             "ecutwfc": 50,
             "kpts": [1, 1, 1],
-            "pseudo_dir": ".",
-            "command": "pw.x"
         },
         "lj_params": {
             "epsilon": 0.5,
@@ -37,15 +43,14 @@ def test_config_from_dict_explicit_lj_params():
         "seed": 123
     }
 
-    config = Config.from_dict(config_dict)
+    config = Config.from_dict(config_dict, dummy_meta_config)
     assert config.lj_params.epsilon == 0.5
     assert config.lj_params.sigma == 2.0
     assert config.lj_params.cutoff == 5.0
     assert config.seed == 123
-    # Check that extra keys were filtered (no error raised)
-    assert config.dft_params.sssp_json_path == "sssp.json"
+    assert config.meta == dummy_meta_config
 
-def test_config_from_dict_generated_lj_params():
+def test_config_from_dict_generated_lj_params(dummy_meta_config):
     elements = ["Cu", "Ni"]
     config_dict = {
         "md_params": {
@@ -66,16 +71,13 @@ def test_config_from_dict_generated_lj_params():
             "potential_yaml_path": "pot.yaml"
         },
         "dft_params": {
-            "sssp_json_path": "sssp.json",
             "ecutwfc": 50,
             "kpts": [1, 1, 1],
-            "pseudo_dir": ".",
-            "command": "pw.x"
         }
         # lj_params MISSING
     }
 
-    config = Config.from_dict(config_dict)
+    config = Config.from_dict(config_dict, dummy_meta_config)
 
     # Calculate expected sigma
     # r_avg = (r_Cu + r_Ni) / 2
@@ -95,7 +97,7 @@ def test_config_from_dict_generated_lj_params():
     assert abs(config.lj_params.cutoff - expected_cutoff) < 2e-3
     assert config.seed == 42 # Default
 
-def test_config_fails_if_no_elements_and_no_lj_params():
+def test_config_fails_if_no_elements_and_no_lj_params(dummy_meta_config):
     config_dict = {
         "md_params": {
             "timestep": 1.0,
@@ -115,11 +117,8 @@ def test_config_fails_if_no_elements_and_no_lj_params():
             "potential_yaml_path": "pot.yaml"
         },
         "dft_params": {
-            "sssp_json_path": "sssp.json",
             "ecutwfc": 50,
             "kpts": [1, 1, 1],
-            "pseudo_dir": ".",
-            "command": "pw.x"
         }
         # lj_params MISSING
     }
@@ -128,4 +127,4 @@ def test_config_fails_if_no_elements_and_no_lj_params():
     # Either MDParams raises TypeError (missing elements) or LJParams raises TypeError (missing args)
     # We just ensure it raises TypeError
     with pytest.raises(TypeError):
-        Config.from_dict(config_dict)
+        Config.from_dict(config_dict, dummy_meta_config)

@@ -43,6 +43,35 @@ def generate_default_lj_params(elements: List[str]) -> Dict[str, float]:
         print(f"Warning: Could not auto-generate LJ params ({e}). Using safe defaults.")
         return {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
 
+@dataclass
+class MetaConfig:
+    """Environment-specific configuration."""
+    dft: Dict[str, Any]
+    lammps: Dict[str, Any]
+
+    @property
+    def dft_command(self) -> str:
+        return self.dft.get("command", "pw.x")
+
+    @property
+    def pseudo_dir(self) -> Path:
+        return Path(self.dft.get("pseudo_dir", "."))
+
+    @property
+    def sssp_json_path(self) -> Path:
+        return Path(self.dft.get("sssp_json_path", "."))
+
+    @property
+    def lammps_command(self) -> str:
+        return self.lammps.get("command", "lmp_serial")
+
+
+@dataclass
+class ExperimentConfig:
+    """Experiment metadata and output settings."""
+    name: str
+    output_dir: Path
+
 
 @dataclass
 class MDParams:
@@ -56,7 +85,7 @@ class MDParams:
     masses: dict[str, float]
     restart_freq: int = 1000
     dump_freq: int = 1000
-    lammps_command: str = "lmp_serial"
+    # lammps_command removed, now in MetaConfig
 
 
 @dataclass
@@ -105,11 +134,9 @@ class KMCParams:
 @dataclass
 class DFTParams:
     """Parameters for Density Functional Theory calculations."""
-    sssp_json_path: str
-    pseudo_dir: str
-    command: str
     kpoint_density: float = 60.0
     auto_physics: bool = True
+    # command, pseudo_dir, sssp_json_path removed, now in MetaConfig
 
 
 @dataclass
@@ -140,40 +167,82 @@ class GenerationParams:
 
 
 @dataclass
+class ACEModelParams:
+    """Parameters for Pacemaker potential model."""
+    pacemaker_config: Dict[str, Any] = field(default_factory=dict)
+    initial_potentials: List[str] = field(default_factory=list)
+
+
+@dataclass
 class TrainingParams:
-    """Parameters for Pacemaker training."""
-    ace_cutoff: float = 7.0
-    max_training_time: int = 3600
-    ladder_step: List[int] = field(default_factory=list)
+    """Parameters for Active Learning Training strategy."""
     replay_ratio: float = 1.0
     global_dataset_path: str = "data/global_dataset.pckl"
-    test_size: float = 0.1
-    energy_weight: float = 100.0
-    force_weight: float = 1.0
-    ace_inner_cutoff: float = 1.5
-
-    # Ladder Strategy
-    ladder_strategy: bool = False
-    initial_max_deg: int = 6
-    final_max_deg: int = 12
-    ladder_interval: int = 5
+    # Pacemaker-specific params removed, moved to ACEModelParams.pacemaker_config
 
 
 @dataclass
 class Config:
     """Main configuration class aggregating all parameter sections."""
+    meta: MetaConfig
+    experiment: ExperimentConfig
     md_params: MDParams
     al_params: ALParams
     dft_params: DFTParams
     lj_params: LJParams
     training_params: TrainingParams
+    ace_model: ACEModelParams
     seed: int = 42
     kmc_params: KMCParams = field(default_factory=KMCParams)
     generation_params: GenerationParams = field(default_factory=GenerationParams)
 
     @classmethod
-    def from_dict(cls, config_dict: dict[str, Any]) -> "Config":
-        """Create a Config instance from a dictionary with auto-LJ generation."""
+    def load_meta(cls, path: Path) -> MetaConfig:
+        """Load environment configuration from meta_config.yaml."""
+        if not path.exists():
+             raise FileNotFoundError(f"Meta config file not found: {path}")
+
+        with path.open("r", encoding="utf-8") as f:
+            meta_dict = yaml.safe_load(f) or {}
+
+        return MetaConfig(
+            dft=meta_dict.get("dft", {}),
+            lammps=meta_dict.get("lammps", {})
+        )
+
+    @classmethod
+    def load_experiment(cls, config_path: Path, meta_config: MetaConfig) -> "Config":
+        """Load experiment configuration and combine with meta config."""
+        path = Path(config_path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+
+        with path.open("r", encoding="utf-8") as f:
+            config_dict = yaml.safe_load(f) or {}
+
+        # Handle constants inheritance if needed (legacy support)
+        constant_path = path.parent / "constant.yaml"
+        if constant_path.exists():
+            with constant_path.open("r", encoding="utf-8") as f:
+                constant_dict = yaml.safe_load(f) or {}
+
+            merged_dict = constant_dict.copy()
+            def update_recursive(d, u):
+                for k, v in u.items():
+                    if isinstance(v, dict):
+                        d[k] = update_recursive(d.get(k, {}), v)
+                    else:
+                        d[k] = v
+                return d
+            update_recursive(merged_dict, config_dict)
+            config_dict = merged_dict
+
+        return cls.from_dict(config_dict, meta_config)
+
+    @classmethod
+    def from_dict(cls, config_dict: dict[str, Any], meta_config: MetaConfig) -> "Config":
+        """Create a Config instance from a dictionary."""
         gen_dict = config_dict.get("generation", {})
         pre_opt_dict = gen_dict.get("pre_optimization", {})
 
@@ -189,48 +258,28 @@ class Config:
             elements = md_dict.get("elements", [])
             lj_dict = generate_default_lj_params(elements)
 
+        # DFT Params: Filter out environment paths if they still exist in dict (backwards compat)
         dft_dict = config_dict.get("dft_params", {}).copy()
-        allowed_dft_keys = {"sssp_json_path", "pseudo_dir", "command", "kpoint_density", "auto_physics"}
+        allowed_dft_keys = {"kpoint_density", "auto_physics"}
         dft_dict = {k: v for k, v in dft_dict.items() if k in allowed_dft_keys}
 
+        exp_dict = config_dict.get("experiment", {})
+
+        ace_dict = config_dict.get("ace_model", {})
+
         return cls(
+            meta=meta_config,
+            experiment=ExperimentConfig(
+                name=exp_dict.get("name", "experiment"),
+                output_dir=Path(exp_dict.get("output_dir", "output"))
+            ),
             md_params=MDParams(**md_dict),
             al_params=ALParams(**config_dict.get("al_params", {})),
             kmc_params=KMCParams(**config_dict.get("kmc_params", {})),
             dft_params=DFTParams(**dft_dict),
             lj_params=LJParams(**lj_dict),
             training_params=TrainingParams(**config_dict.get("training_params", {})),
+            ace_model=ACEModelParams(**ace_dict),
             generation_params=generation_params,
             seed=config_dict.get("seed", 42)
         )
-
-    @classmethod
-    def from_yaml(cls, config_path: str | Path) -> "Config":
-        """Load configuration from YAML file(s)."""
-        path = Path(config_path)
-
-        if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
-
-        with path.open("r", encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f) or {}
-
-        constant_path = path.parent / "constant.yaml"
-        if constant_path.exists():
-            with constant_path.open("r", encoding="utf-8") as f:
-                constant_dict = yaml.safe_load(f) or {}
-
-            merged_dict = constant_dict.copy()
-
-            def update_recursive(d, u):
-                for k, v in u.items():
-                    if isinstance(v, dict):
-                        d[k] = update_recursive(d.get(k, {}), v)
-                    else:
-                        d[k] = v
-                return d
-
-            update_recursive(merged_dict, config_dict)
-            config_dict = merged_dict
-
-        return cls.from_dict(config_dict)

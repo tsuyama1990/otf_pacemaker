@@ -10,7 +10,7 @@ from ase import Atoms
 from ase.calculators.espresso import Espresso, EspressoProfile
 from pathlib import Path
 
-from src.core.config import DFTParams
+from src.core.config import DFTParams, MetaConfig
 from src.engines.dft.heuristics import PymatgenHeuristics
 from src.utils.sssp_loader import (
     load_sssp_database,
@@ -24,13 +24,15 @@ logger = logging.getLogger(__name__)
 class DFTConfigurator:
     """Builder for DFT Calculators merging Config and Heuristics."""
 
-    def __init__(self, params: DFTParams):
+    def __init__(self, params: DFTParams, meta: MetaConfig):
         """Initialize with DFT parameters.
 
         Args:
             params: The static DFT configuration.
+            meta: The environment configuration (paths, commands).
         """
         self.params = params
+        self.meta = meta
 
     def build(self, atoms: Atoms, elements: List[str], kpts: Optional[tuple] = None) -> tuple[Espresso, Dict[str, float]]:
         """Build a configured Espresso calculator.
@@ -43,10 +45,11 @@ class DFTConfigurator:
         Returns:
             Tuple[Espresso, Dict[str, float]]: The configured calculator and the magnetic moments map.
         """
-        # 1. Load SSSP and Pseudopotentials (Static Config)
-        sssp_db = load_sssp_database(self.params.sssp_json_path)
-        pseudo_dir_abs = str(Path(self.params.pseudo_dir).resolve())
+        # 1. Load SSSP and Pseudopotentials (Environment Config)
+        sssp_path = self.meta.sssp_json_path
+        pseudo_dir_abs = str(self.meta.pseudo_dir.resolve())
 
+        sssp_db = load_sssp_database(str(sssp_path))
         validate_pseudopotentials(pseudo_dir_abs, elements, sssp_db)
 
         pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
@@ -98,7 +101,7 @@ class DFTConfigurator:
 
         # 5. Create Profile and Calculator
         profile = EspressoProfile(
-            command=self.params.command,
+            command=self.meta.dft_command,
             pseudo_dir=pseudo_dir_abs
         )
 
