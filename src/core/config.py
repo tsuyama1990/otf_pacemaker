@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, List, Dict
-from ase.data import atomic_numbers, covalent_radii  # REQUIRED for physics-based defaults
+from ase.data import atomic_numbers, covalent_radii
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,6 @@ def generate_default_lj_params(elements: List[str]) -> Dict[str, float]:
         - Cutoff: Defaults to 2.5 * sigma.
     """
     if not elements:
-        # Fallback safety defaults
         return {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
 
     try:
@@ -39,12 +38,10 @@ def generate_default_lj_params(elements: List[str]) -> Dict[str, float]:
         avg_radius = np.mean(radii)
 
         # r_min = 2^(1/6) * sigma
-        # We want r_min roughly at the sum of radii (2 * avg_radius)
-        # Therefore: sigma = (2 * r_avg) / 1.122
         sigma = (2.0 * avg_radius) * 0.8909
 
         return {
-            "epsilon": 1.0,  # Hard stability wall
+            "epsilon": 1.0,
             "sigma": float(round(sigma, 3)),
             "cutoff": float(round(2.5 * sigma, 3))
         }
@@ -112,10 +109,10 @@ class KMCParams:
 @dataclass
 class DFTParams:
     """Parameters for Density Functional Theory calculations."""
-    sssp_json_path: str  # Path to SSSP JSON database
+    sssp_json_path: str
     pseudo_dir: str
     command: str
-    kpoint_density: float = 60.0  # Å, for k-point grid calculation (high precision)
+    kpoint_density: float = 60.0
 
 
 @dataclass
@@ -124,6 +121,7 @@ class LJParams:
     epsilon: float
     sigma: float
     cutoff: float
+    shift_energy: bool = True  # Enforce V(rc) = 0 logic synchronization
 
 
 @dataclass
@@ -141,7 +139,20 @@ class GenerationParams:
     """Parameters for scenario-driven generation."""
     pre_optimization: PreOptimizationParams = field(default_factory=PreOptimizationParams)
     scenarios: List[Dict[str, Any]] = field(default_factory=list)
-    device: str = "cuda"  # Device for MACE filtering (cuda/cpu)
+    device: str = "cuda"
+
+
+@dataclass
+class TrainingParams:
+    """Parameters for Pacemaker training."""
+    ace_cutoff: float = 7.0
+    max_training_time: int = 3600
+    ladder_step: List[int] = field(default_factory=list)
+    replay_ratio: float = 1.0
+    global_dataset_path: str = "data/global_dataset.pckl"
+    test_size: float = 0.1
+    energy_weight: float = 100.0
+    force_weight: float = 1.0
 
 
 @dataclass
@@ -151,7 +162,8 @@ class Config:
     al_params: ALParams
     dft_params: DFTParams
     lj_params: LJParams
-    seed: int = 42  # Global random seed
+    training_params: TrainingParams
+    seed: int = 42
     kmc_params: KMCParams = field(default_factory=KMCParams)
     generation_params: GenerationParams = field(default_factory=GenerationParams)
 
@@ -166,21 +178,15 @@ class Config:
             scenarios=gen_dict.get("scenarios", [])
         )
 
-        # Extract MD Params first to get elements
         md_dict = config_dict.get("md_params", {})
 
         # --- AUTOMATED LJ LOGIC ---
         lj_dict = config_dict.get("lj_params", {})
-
         if not lj_dict:
-            # Retrieve elements from md_params (CRITICAL STEP)
             elements = md_dict.get("elements", [])
-            # Generate defaults
             lj_dict = generate_default_lj_params(elements)
         # --------------------------
 
-        # Clean DFT Params (Remove unsupported keys like 'ecutwfc', 'kpts')
-        # DFTParams only accepts: sssp_json_path, pseudo_dir, command, kpoint_density
         dft_dict = config_dict.get("dft_params", {}).copy()
         allowed_dft_keys = {"sssp_json_path", "pseudo_dir", "command", "kpoint_density"}
         dft_dict = {k: v for k, v in dft_dict.items() if k in allowed_dft_keys}
@@ -191,37 +197,27 @@ class Config:
             kmc_params=KMCParams(**config_dict.get("kmc_params", {})),
             dft_params=DFTParams(**dft_dict),
             lj_params=LJParams(**lj_dict),
+            training_params=TrainingParams(**config_dict.get("training_params", {})),
             generation_params=generation_params,
             seed=config_dict.get("seed", 42)
         )
 
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Config":
-        """Load configuration from YAML file(s).
-
-        Automatically looks for 'constant.yaml' in the same directory
-        and merges it with the main config.
-        """
+        """Load configuration from YAML file(s)."""
         path = Path(config_path)
 
-        # 1. Load Main Config
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
 
         with path.open("r", encoding="utf-8") as f:
             config_dict = yaml.safe_load(f) or {}
 
-        # 2. Load Constants (if exists)
         constant_path = path.parent / "constant.yaml"
         if constant_path.exists():
             logger.info(f"Loading constants from {constant_path}")
             with constant_path.open("r", encoding="utf-8") as f:
                 constant_dict = yaml.safe_load(f) or {}
-
-            # Merge constants into config_dict (Deep Merge)
-            # Strategy: Config overrides Constants? Or Constants are separate?
-            # Usually Constants are defaults/reference. Config is user override.
-            # So we start with constant_dict and update with config_dict.
 
             merged_dict = constant_dict.copy()
 
