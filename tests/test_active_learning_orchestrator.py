@@ -100,26 +100,34 @@ def test_orchestrator_initial_asi_generation(mock_read, mock_exists, mock_mkdir,
     # Simulate loop breaking to avoid infinite loop
     md_engine.run.side_effect = [SimulationState.COMPLETED]
 
-    # Initial file check behavior
-    def exists_side_effect(self):
-        # We need potential and structure to exist
-        if str(self).endswith("pot.yace"): return True
-        if str(self).endswith("start.xyz"): return True
-        return False
+    # Mock Path.exists logic
+    # We need potential and structure to exist for run() to proceed to MD
+    # But for update_active_set, we just need run() to start.
 
-    # We patch exists on the class, but side_effect needs to handle instance
-    # This is tricky with patch('pathlib.Path.exists').
-    # Let's simplify and just rely on the logic flow.
+    # We must patch 'src.workflows.orchestrator.Path.exists' specifically if we want to control orchestrator logic
+    # But since we patched 'src.workflows.orchestrator.Path.exists' in the decorator, mock_exists is the mock object.
+
+    def exists_side_effect(self):
+        # Allow state file check (return False so we start new)
+        if str(self).endswith("orchestrator_state.json"): return False
+        # Allow potential check
+        if str(self).endswith("pot.yace"): return True
+        return True # Default to True for other checks to avoid weird crashes
+
+    # Since mock_exists is a function in the orchestrator module patch,
+    # we can't easily side_effect based on 'self' (the Path instance).
+    # The patch replaces the method on the class? No, Path.exists is an instance method.
+    # The patch 'src.workflows.orchestrator.Path.exists' might replace the unbound method or similar.
+    # A better way is to rely on simple return_value=True and mock _load_state to return empty dict.
+
+    mock_exists.return_value = True
 
     orch = ActiveLearningOrchestrator(
         config, md_engine, kmc_engine, sampler, generator, labeler, trainer
     )
 
-    # We want to verify that trainer.update_active_set is called
-    # when initial_active_set_path is None and initial_dataset_path is set.
-
-    # To run just the init part, we can't easily stop __init__ or run,
-    # but run() does the check at start.
+    # Mock _load_state to return empty dict (fresh start)
+    orch._load_state = MagicMock(return_value={})
 
     # Mocking resolve_path to return dummy paths
     orch._resolve_path = MagicMock(side_effect=lambda x, y: Path(x))

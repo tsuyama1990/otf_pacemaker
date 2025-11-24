@@ -9,6 +9,8 @@ import logging
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional, List, Tuple, Dict, Any, Union
+from scipy import constants
+from scipy import sparse
 
 from ase import Atoms
 from ase.mep import MinModeAtoms, DimerControl
@@ -22,12 +24,13 @@ except ImportError:
     # Fallback for environments where pyace is not installed (e.g. testing)
     PyACECalculator = None
 
+# Numba Handling
 try:
     from numba import jit
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
-    # Dummy decorator if numba is missing
+    # Dummy decorator
     def jit(*args, **kwargs):
         def decorator(func):
             return func
@@ -39,6 +42,8 @@ from src.core.config import KMCParams, ALParams
 
 logger = logging.getLogger(__name__)
 
+# Constants (Externalized)
+KB_EV = constants.k / constants.e  # Boltzmann constant in eV/K ~ 8.617e-5
 
 def _setup_calculator(atoms: Atoms, potential_path: str):
     """Attach the Pacemaker calculator to the atoms.
@@ -46,12 +51,10 @@ def _setup_calculator(atoms: Atoms, potential_path: str):
     Helper function for workers.
     """
     if PyACECalculator is None:
-        # Check if we are mocking/testing
         if hasattr(atoms, "calc") and atoms.calc is not None:
             return
         raise ImportError("pyace module is required for KMC Engine.")
 
-    # We assume potential_path is a .yace or .yaml file
     calc = PyACECalculator(potential_path)
     atoms.calc = calc
 
@@ -67,22 +70,10 @@ def _bfs_traversal_numba(
 ) -> np.ndarray:
     """
     BFS traversal using Numba.
-
-    Args:
-        start_node: Starting atom index.
-        indices: CSR matrix indices array (neighbors).
-        indptr: CSR matrix indptr array (offsets).
-        cns: Array of CNs for all atoms.
-        cn_cutoff: Cutoff for 'adsorbate' status.
-        num_atoms: Total number of atoms.
-
-    Returns:
-        Array of indices belonging to the cluster.
     """
     visited = np.zeros(num_atoms, dtype=np.bool_)
     visited[start_node] = True
 
-    # Pre-allocate queue (max size = num_atoms)
     queue = np.empty(num_atoms, dtype=np.int32)
     q_head = 0
     q_tail = 0
@@ -90,10 +81,6 @@ def _bfs_traversal_numba(
     queue[q_tail] = start_node
     q_tail += 1
 
-    # List to store cluster members
-    # Numba doesn't support dynamic list append well in all versions,
-    # but we can use an array and a counter or a list if typed.
-    # Using an array for output is safer with nopython.
     cluster_buffer = np.empty(num_atoms, dtype=np.int32)
     cluster_count = 0
 
@@ -104,7 +91,6 @@ def _bfs_traversal_numba(
         current = queue[q_head]
         q_head += 1
 
-        # Get neighbors from CSR structure
         start_idx = indptr[current]
         end_idx = indptr[current + 1]
 
@@ -112,7 +98,6 @@ def _bfs_traversal_numba(
             neighbor = indices[k]
 
             if not visited[neighbor]:
-                # CRITICAL CHECK: Only traverse if neighbor is ALSO an adsorbate
                 if cns[neighbor] < cn_cutoff:
                     visited[neighbor] = True
                     queue[q_tail] = neighbor
@@ -122,6 +107,84 @@ def _bfs_traversal_numba(
                     cluster_count += 1
 
     return cluster_buffer[:cluster_count]
+
+
+def _bfs_traversal_scipy(
+    start_node: int,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    cns: np.ndarray,
+    cn_cutoff: int,
+    num_atoms: int
+) -> np.ndarray:
+    """
+    BFS traversal using Scipy (Fallback).
+
+    Strategy:
+    1. Identify 'valid' nodes (cns < cutoff).
+    2. Construct a subgraph or traverse logically.
+    3. Scipy csgraph traversal usually works on the whole matrix.
+
+    Efficient implementation:
+    We perform a Python-level BFS but use vectorized operations where possible,
+    or just use scipy's breadth_first_order if we can mask the graph.
+
+    Since masking the graph (creating new CSR) might be expensive,
+    and we just need one cluster, a simple iterative approach is fine
+    if Numba is missing. It's slower but robust.
+
+    However, prompt asked for 'vectorized implementation using scipy.sparse'.
+    We can mask the adjacency matrix: keep edges (i, j) only if BOTH i and j are valid.
+    Actually, we only need to check if neighbor is valid.
+
+    Let's create a boolean mask of valid atoms.
+    valid_mask = cns < cn_cutoff
+    """
+    # Create valid mask
+    valid_mask = cns < cn_cutoff
+    # Start node is assumed valid by caller (or we check)
+    if not valid_mask[start_node]:
+        return np.array([start_node], dtype=np.int32)
+
+    # Reconstruct CSR for valid subgraph?
+    # This involves filtering edges.
+    # Alternatively, just use pure python queue for fallback if we assume small molecules.
+    # But for "Scalability", pure python is bad.
+
+    # Scipy approach:
+    # 1. Zero out rows/cols of invalid nodes in the adjacency matrix.
+    #    This disconnects them.
+    # 2. Run BFS from start_node.
+
+    # Check if we have data to reconstruct matrix
+    # We only have indices/indptr (topology). Data is usually 1s.
+
+    data = np.ones(len(indices), dtype=np.int8)
+    adj = sparse.csr_matrix((data, indices, indptr), shape=(num_atoms, num_atoms))
+
+    # We want to restrict traversal to 'valid_mask' nodes.
+    # A trick is to multiply the matrix by the mask diagonal.
+    # M' = D * M * D where D is diagonal matrix with 1 for valid, 0 for invalid.
+
+    diag_data = valid_mask.astype(np.int8)
+    D = sparse.diags(diag_data)
+
+    # Filtered Adjacency
+    adj_filtered = D @ adj @ D
+
+    # Now BFS
+    # breadth_first_order returns (node_array, predecessors)
+    nodes, _ = sparse.csgraph.breadth_first_order(
+        adj_filtered,
+        i_start=start_node,
+        directed=False,
+        return_predecessors=True
+    )
+
+    # The result contains ALL reachable nodes in the filtered graph starting from start_node.
+    # This corresponds exactly to the connected component satisfying the condition.
+
+    return nodes.astype(np.int32)
 
 
 class OffLatticeKMCEngine(KMCEngine):
@@ -137,6 +200,9 @@ class OffLatticeKMCEngine(KMCEngine):
         self.kmc_params = kmc_params
         self.al_params = al_params
 
+        if not HAS_NUMBA:
+            logger.warning("Numba not detected. Falling back to Scipy for graph traversal. Performance may degrade.")
+
     def _identify_moving_cluster(
         self,
         atoms: Atoms,
@@ -145,20 +211,31 @@ class OffLatticeKMCEngine(KMCEngine):
         indptr: np.ndarray,
         cns: np.ndarray
     ) -> List[int]:
-        """Identify the connected cluster using Numba-optimized BFS."""
+        """Identify the connected cluster using Numba-optimized BFS or Scipy fallback."""
 
         # Check center first
         if cns[center_idx] >= self.kmc_params.adsorbate_cn_cutoff:
              return [center_idx]
 
-        cluster_arr = _bfs_traversal_numba(
-            center_idx,
-            indices,
-            indptr,
-            cns,
-            self.kmc_params.adsorbate_cn_cutoff,
-            len(atoms)
-        )
+        if HAS_NUMBA:
+            cluster_arr = _bfs_traversal_numba(
+                center_idx,
+                indices,
+                indptr,
+                cns,
+                self.kmc_params.adsorbate_cn_cutoff,
+                len(atoms)
+            )
+        else:
+            cluster_arr = _bfs_traversal_scipy(
+                center_idx,
+                indices,
+                indptr,
+                cns,
+                self.kmc_params.adsorbate_cn_cutoff,
+                len(atoms)
+            )
+
         return sorted(cluster_arr.tolist())
 
     def _carve_cluster(
@@ -222,10 +299,7 @@ class OffLatticeKMCEngine(KMCEngine):
 
     def _run_single_search(
         self,
-        full_atoms_snapshot: Atoms, # Passed as snapshot to worker? No, usually passed whole
-        # To avoid pickling large atoms object repeatedly, process pool usually shares memory on fork (Linux)
-        # But if using 'spawn', it copies.
-        # We assume 'fork' is default on Linux.
+        full_atoms_snapshot: Atoms,
         potential_path: str,
         target_idx: int,
         indices: np.ndarray,
@@ -258,11 +332,9 @@ class OffLatticeKMCEngine(KMCEngine):
         search_atoms = cluster.copy()
         _setup_calculator(search_atoms, potential_path)
 
-        # Coherent displacement for the whole molecule
         coherent_disp = np.random.normal(0, self.kmc_params.search_radius, 3)
 
         for idx in local_moving_indices:
-            # Add coherent displacement + small thermal noise
             noise = np.random.normal(0, self.kmc_params.search_radius * 0.2, 3)
             search_atoms.positions[idx] += coherent_disp + noise
 
@@ -279,7 +351,6 @@ class OffLatticeKMCEngine(KMCEngine):
 
         opt = FIRE(dimer_atoms, logfile=None)
 
-        # FineTuna Logic
         converged = False
         uncertain = False
         max_steps = 1000
@@ -320,15 +391,11 @@ class OffLatticeKMCEngine(KMCEngine):
             )
 
         if converged:
-            # Relax Product
             product_atoms = search_atoms.copy()
             _setup_calculator(product_atoms, potential_path)
 
             prod_opt = FIRE(product_atoms, logfile=None)
             prod_opt.run(fmax=self.kmc_params.dimer_fmax, steps=500)
-
-            # Check Product Uncertainty?
-            # (Optional but good practice)
 
             e_saddle = dimer_atoms.get_potential_energy()
             e_initial = cluster.get_potential_energy()
@@ -342,35 +409,21 @@ class OffLatticeKMCEngine(KMCEngine):
 
 
     def select_active_candidates(self, atoms: Atoms, cns: np.ndarray) -> np.ndarray:
-        """Select candidate atoms for KMC searches based on configuration.
-
-        Args:
-            atoms: The atomic structure.
-            cns: Coordination numbers for each atom.
-
-        Returns:
-            Array of indices of valid candidate atoms.
-        """
-        # Defaults (Select All)
+        """Select candidate atoms for KMC searches based on configuration."""
         species_mask = np.ones(len(atoms), dtype=bool)
         surface_mask = np.ones(len(atoms), dtype=bool)
 
         mode = self.kmc_params.active_region_mode
 
-        # 1. Species Filter
         if mode in ["species", "surface_and_species"]:
             if self.kmc_params.active_species:
                  symbols = np.array(atoms.get_chemical_symbols())
                  species_mask = np.isin(symbols, self.kmc_params.active_species)
 
-        # 2. Surface Filter
         if mode in ["surface", "surface_and_species"]:
             z_coords = atoms.positions[:, 2]
             surface_mask = z_coords > self.kmc_params.active_z_cutoff
 
-        # 3. Low CN Filter (Always applied for adsorbates?)
-        # The memory says "strictly filters out atoms with CN >= adsorbate_cn_cutoff".
-        # This implies it's a hard constraint for "adsorbate" KMC.
         cn_mask = cns < self.kmc_params.adsorbate_cn_cutoff
 
         valid_mask = species_mask & surface_mask & cn_mask
@@ -381,18 +434,16 @@ class OffLatticeKMCEngine(KMCEngine):
         """Run a single KMC step."""
 
         atoms = initial_atoms.copy()
-        _setup_calculator(atoms, potential_path) # Attach for minimization
+        _setup_calculator(atoms, potential_path)
 
-        # Minimize Basin
         try:
             opt = FIRE(atoms, logfile=None)
             opt.run(fmax=self.kmc_params.dimer_fmax, steps=200)
         except Exception:
             pass
 
-        atoms.calc = None # Detach for pickling/passing
+        atoms.calc = None
 
-        # 1. Build Connectivity & CNs (Once for Full System)
         cutoff = self.kmc_params.cluster_connectivity_cutoff
         nl = NeighborList(
             [cutoff/2.0]*len(atoms),
@@ -402,31 +453,23 @@ class OffLatticeKMCEngine(KMCEngine):
         )
         nl.update(atoms)
 
-        # Get CSR Matrix
-        # sparse=True returns a scipy.sparse.dok_matrix usually, convert to CSR
         matrix = nl.get_connectivity_matrix(sparse=True)
         csr_matrix = matrix.tocsr()
         indices = csr_matrix.indices
         indptr = csr_matrix.indptr
-
-        # Compute CNs
-        # Row counts in CSR
         cns = np.diff(indptr)
 
-        # 2. Target Selection
         candidate_indices = self.select_active_candidates(atoms, cns)
 
         if len(candidate_indices) == 0:
             logger.warning("No valid KMC candidates.")
             return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_atoms)
 
-        # Select Unique Targets
         n_select = min(self.kmc_params.n_searches, len(candidate_indices))
         selected_targets = np.random.choice(candidate_indices, size=n_select, replace=False)
 
         logger.info(f"Dispatching {n_select} parallel searches...")
 
-        # 3. Parallel Execution
         found_events = []
         uncertain_results = []
 
@@ -455,7 +498,6 @@ class OffLatticeKMCEngine(KMCEngine):
                 except Exception as e:
                     logger.error(f"Worker failed: {e}")
 
-        # 4. Aggregation
         if uncertain_results:
              return uncertain_results[0]
 
@@ -463,7 +505,7 @@ class OffLatticeKMCEngine(KMCEngine):
              return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_atoms)
 
         # Rate Calculation
-        k_B = 8.617333262e-5
+        k_B = KB_EV
         T = self.kmc_params.temperature
         v = self.kmc_params.prefactor
 
@@ -481,7 +523,6 @@ class OffLatticeKMCEngine(KMCEngine):
 
         barrier, displacement, index_map = found_events[selected_idx]
 
-        # Apply Event
         final_atoms = atoms.copy()
         final_atoms.positions[index_map] += displacement
         if final_atoms.pbc.any():

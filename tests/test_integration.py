@@ -42,6 +42,7 @@ class TestIntegrationPhase3(unittest.TestCase):
                 "num_parallel_labeling": 2
             },
             "dft_params": {
+                "sssp_json_path": "sssp.json",
                 "ecutwfc": 30,
                 "kpts": [1, 1, 1],
                 "pseudo_dir": "pseudos",
@@ -65,19 +66,24 @@ class TestIntegrationPhase3(unittest.TestCase):
 
         # Create dummy pseudo dir
         (Path(self.test_dir) / "pseudos").mkdir()
+        # Create dummy sssp file
+        (Path(self.test_dir) / "sssp.json").touch()
 
     def tearDown(self):
         shutil.rmtree(self.test_dir)
 
-    @patch("src.main.Espresso")
+    @patch("src.main.ComponentFactory")
     @patch("src.main.SeedGenerator")
     @patch("src.main.ActiveLearningOrchestrator")
-    def test_main_runs_phase1_if_potential_missing(self, mock_orchestrator, mock_seed_gen, mock_espresso):
+    def test_main_runs_phase1_if_potential_missing(self, mock_orchestrator, mock_seed_gen, mock_factory_cls):
         """Test that Phase 1 is triggered if initial potential is missing."""
         # potential.yace does not exist in self.test_dir
 
-        # Mock Espresso to avoid runtime errors during instantiation in main
-        mock_espresso.return_value = MagicMock()
+        # Mock Factory
+        mock_factory = mock_factory_cls.return_value
+        # We don't strictly need to set return values for create_* as orchestrator is mocked too
+        # but good practice
+        mock_factory.create_md_engine.return_value = MagicMock()
 
         # Create mock instances
         mock_seed_instance = mock_seed_gen.return_value
@@ -109,13 +115,13 @@ class TestIntegrationPhase3(unittest.TestCase):
         mock_orchestrator.assert_called_once()
         mock_orch_instance.run.assert_called_once()
 
-    @patch("src.main.Espresso")
+    @patch("src.main.ComponentFactory")
     @patch("src.main.SeedGenerator")
     @patch("src.main.ActiveLearningOrchestrator")
-    def test_main_skips_phase1_if_potential_exists(self, mock_orchestrator, mock_seed_gen, mock_espresso):
+    def test_main_skips_phase1_if_potential_exists(self, mock_orchestrator, mock_seed_gen, mock_factory_cls):
         """Test that Phase 1 is skipped if initial potential exists."""
-        # Mock Espresso
-        mock_espresso.return_value = MagicMock()
+        # Mock Factory
+        mock_factory = mock_factory_cls.return_value
 
         import os
         current_dir = os.getcwd()

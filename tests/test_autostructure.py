@@ -50,7 +50,8 @@ def test_pre_optimization():
     # Create two atoms very close
     # Starting at 0.4 A, PreOptimizer with LJ should push them apart.
     atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.4]])
-    preopt = PreOptimizer()
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    preopt = PreOptimizer(lj_params=lj_params)
 
     # Run pre-optimization
     # If it fails (still too close), it raises ValueError.
@@ -73,7 +74,8 @@ def test_pre_optimization():
 def test_ionic_generator():
     # NaCl
     atoms = bulk("NaCl", "rocksalt", a=5.64)
-    gen = IonicGenerator(atoms)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    gen = IonicGenerator(atoms, lj_params=lj_params)
     results = gen.generate_all()
 
     # Check types
@@ -89,7 +91,8 @@ def test_ionic_generator():
 
 def test_alloy_generator():
     atoms = bulk("Cu", "fcc", a=3.6)
-    gen = AlloyGenerator(atoms)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    gen = AlloyGenerator(atoms, lj_params=lj_params)
     results = gen.generate_all()
 
     types = [a.info.get("type") for a in results]
@@ -100,7 +103,8 @@ def test_alloy_generator():
 
 def test_covalent_generator():
     atoms = bulk("Si", "diamond", a=5.43)
-    gen = CovalentGenerator(atoms)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    gen = CovalentGenerator(atoms, lj_params=lj_params)
     results = gen.generate_all()
 
     types = [a.info.get("type") for a in results]
@@ -112,7 +116,8 @@ def test_molecular_generator():
     # Fake molecular crystal (just CO2 in a box)
     # CO bond is ~1.16 A
     atoms = Atoms("CO2", positions=[[0,0,0], [0,0,1.16], [0,0,-1.16]], cell=[10,10,10], pbc=True)
-    gen = MolecularGenerator(atoms)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    gen = MolecularGenerator(atoms, lj_params=lj_params)
     results = gen.generate_all()
 
     types = [a.info.get("type") for a in results]
@@ -124,7 +129,8 @@ def test_interface_builder():
     a = bulk("Cu", "fcc", a=3.6)
     b = bulk("Ag", "fcc", a=4.09)
 
-    builder = InterfaceBuilder(a, b)
+    lj_params = {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+    builder = InterfaceBuilder(a, b, lj_params=lj_params)
     results = builder.generate_all()
 
     types = [a.info.get("type") for a in results]
