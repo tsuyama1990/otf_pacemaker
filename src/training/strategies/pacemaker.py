@@ -6,25 +6,27 @@ import yaml
 import logging
 import numpy as np
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from ase import Atoms
 
 from src.core.interfaces import Trainer
-from src.core.config import TrainingParams
+from src.core.config import TrainingParams, ACEModelParams
 from src.utils.hardware import get_available_vram, suggest_batch_size
 
 logger = logging.getLogger(__name__)
 
 class PacemakerTrainer(Trainer):
-    """Manages the training process for ACE potentials with Experience Replay, Ladder Strategy, and GPU opt."""
+    """Manages the training process for ACE potentials with Experience Replay and Pass-through Config."""
 
-    def __init__(self, training_params: TrainingParams):
+    def __init__(self, ace_model_params: ACEModelParams, training_params: TrainingParams):
         """Initialize PacemakerTrainer.
 
         Args:
-            training_params: Configuration parameters for training.
+            ace_model_params: Pass-through configuration for Pacemaker.
+            training_params: Configuration parameters for AL training strategy (replay).
         """
-        self.params = training_params
+        self.ace_params = ace_model_params
+        self.training_params = training_params
 
     def prepare_dataset(self, structures: List[Atoms]) -> str:
         """Convert a list of labeled Atoms objects into a training dataset.
@@ -49,7 +51,7 @@ class PacemakerTrainer(Trainer):
         Returns:
             str: Path to the mixed training dataset file.
         """
-        global_path = Path(self.params.global_dataset_path)
+        global_path = Path(self.training_params.global_dataset_path)
 
         # 1. Load New Data
         new_df = pd.read_pickle(new_data_path)
@@ -74,7 +76,7 @@ class PacemakerTrainer(Trainer):
         n_new = len(new_df)
         n_global = len(combined_global)
         n_old = n_global - n_new
-        ratio = self.params.replay_ratio
+        ratio = self.training_params.replay_ratio
 
         if n_old > 0 and ratio > 0:
             n_replay = int(n_new * ratio)
@@ -130,12 +132,6 @@ class PacemakerTrainer(Trainer):
         """Prune the active set to remove redundant structures.
 
         Uses pace_activeset --prune logic (if available, otherwise we might need custom logic).
-        Prompt says: "Use pace_activeset's pruning function".
-        Assuming usage: pace_activeset -a potential.asi --prune threshold
-
-        Args:
-            active_set_path: Path to the .asi file.
-            threshold: Similarity threshold (default 0.99).
         """
         if not Path(active_set_path).exists():
             logger.warning(f"Active set {active_set_path} not found. Skipping prune.")
@@ -156,41 +152,10 @@ class PacemakerTrainer(Trainer):
             logger.warning(f"pace_activeset pruning failed: {e.stderr}")
             # Non-critical failure
 
-    def _get_dynamic_config(self, iteration: int) -> Dict[str, Any]:
-        """Generate dynamic configuration based on iteration and hardware.
-
-        Args:
-            iteration: Current training iteration (0-indexed).
-
-        Returns:
-            dict: Configuration parameters for potential and backend.
-        """
-        config = {}
-
-        # 1. Ladder Logic
-        if self.params.ladder_strategy:
-            step = iteration // self.params.ladder_interval
-            new_max_deg = self.params.initial_max_deg + step
-            if new_max_deg > self.params.final_max_deg:
-                new_max_deg = self.params.final_max_deg
-
-            logger.info(f"Ladder Strategy: Iteration {iteration}, max_deg set to {new_max_deg}")
-            config["max_deg"] = new_max_deg
-        else:
-            config["max_deg"] = self.params.initial_max_deg
-
-        # 2. GPU Logic
-        vram = get_available_vram()
-        batch_size = suggest_batch_size(vram)
-        logger.info(f"GPU Logic: VRAM={vram} bytes, Batch Size={batch_size}")
-        config["batch_size"] = batch_size
-
-        return config
-
     def train(self, dataset_path: str, initial_potential: Optional[str] = None,
               potential_yaml_path: Optional[str] = None, asi_path: Optional[str] = None,
               iteration: int = 0) -> str:
-        """Train the potential using Pacemaker.
+        """Train the potential using Pacemaker with pass-through configuration.
 
         Args:
             dataset_path: Path to the new data (or current iteration data).
@@ -215,73 +180,59 @@ class PacemakerTrainer(Trainer):
              except Exception as e:
                  logger.error(f"Failed to update active set: {e}. Proceeding with existing ASI if available.")
 
-        # Determine elements
-        elements = []
-        if initial_potential is None:
+        # 3. Base Config from Pass-through
+        # Deep copy to avoid modifying the original config object
+        config = yaml.safe_load(yaml.safe_dump(self.ace_params.pacemaker_config))
+
+        # 4. Mandatory Overrides
+        # Data path
+        config.setdefault("data", {})
+        config["data"]["filename"] = mixed_dataset_path
+
+        # Elements inference if not present (Optional, prompt said override but usually redundant if input_potential is used)
+        if "potential" not in config:
+             config["potential"] = {}
+
+        # Try to infer elements from dataset if not provided in config
+        if "elements" not in config["potential"]:
             try:
                 df = pd.read_pickle(mixed_dataset_path)
                 all_symbols = set()
                 for atoms in df['ase_atoms']:
                     all_symbols.update(atoms.get_chemical_symbols())
                 elements = sorted(list(all_symbols))
+                config["potential"]["elements"] = elements
             except Exception as e:
                 logger.warning(f"Could not read elements from dataset: {e}")
 
-        # 3. Dynamic Config Generation
-        dynamic_settings = self._get_dynamic_config(iteration)
-
-        config = {
-            "cutoff": self.params.ace_cutoff,
-            "data": {
-                "filename": mixed_dataset_path,
-                "test_size": self.params.test_size,
-            },
-            "potential": {
-                "delta": True,
-            },
-            "fitting": {
-                "fit_cycles": 1,
-                "max_time": self.params.max_training_time,
-                "weighting": {
-                     "type": "EnergyForce",
-                     "energy": self.params.energy_weight,
-                     "force": self.params.force_weight
-                }
-            },
-            "backend": {
-                "evaluator": "tensorpot",
-                "batch_size": dynamic_settings.get("batch_size", 32)
-            }
-        }
-
-        if self.params.ladder_step:
-             config["fitting"]["ladder_step"] = self.params.ladder_step
-
+        # 5. Multi-stage Learning (List handling)
+        input_pots = []
+        # Add singular potential (e.g. from previous iteration)
         if initial_potential:
-            config["fitting"]["input_potential"] = initial_potential
-        else:
-            config["potential"]["elements"] = elements
-            config["potential"]["bonds"] = {
-                "N": 3,
-                "max_deg": dynamic_settings.get("max_deg", 6),
-                "r0": 1.5,
-                "rad_base": "Chebyshev",
-                "rad_parameters": [self.params.ace_cutoff],
-                "r_in": self.params.ace_inner_cutoff,
-            }
-            config["potential"]["embeddings"] = {
-                 el: {
-                     "npot": "FinnisSinclair",
-                     "fs_parameters": [1, 1, 1, 0.5],
-                     "ndensity": 1,
-                 } for el in elements
-            }
+             input_pots.append(initial_potential)
 
+        # Add list from Config (e.g. from base potentials)
+        if self.ace_params.initial_potentials:
+             input_pots.extend(self.ace_params.initial_potentials)
+
+        if input_pots:
+             config.setdefault("fitting", {})
+             # If only one potential, can be string or list. Pacemaker supports list for mixing?
+             # Actually Pacemaker documentation says input_potential can be a list for mixing.
+             # If it's a single potential, we can pass it as a string or single-item list.
+             # We pass as list to be robust if the backend supports it,
+             # but check if we should unwrap if len==1 for safety.
+             if len(input_pots) == 1:
+                 config["fitting"]["input_potential"] = input_pots[0]
+             else:
+                 config["fitting"]["input_potential"] = input_pots
+
+        # 6. Write Input File
         input_yaml_path = "input.yaml"
         with open(input_yaml_path, "w") as f:
             yaml.dump(config, f)
 
-        # 4. Run Training
+        # 7. Run Training
         logger.info(f"Starting Pacemaker training with config: {config}")
         try:
             subprocess.run(["pacemaker", input_yaml_path], check=True)

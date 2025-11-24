@@ -1,169 +1,181 @@
 # -----------------------------------------------------------------------------
 # User Configuration File (config.yaml)
-# ユーザー設定ファイル
-# シミュレーションの条件や実行環境に依存するパスなどを設定します。
+#
+# This file defines the physics, experiment parameters, and model architecture.
+# It should be environment-agnostic.
 # -----------------------------------------------------------------------------
 
-# ・MDシミュレーションパラメータ
-#   Molecular Dynamics (MD) の実行条件を設定します。
+# -----------------------------------------------------------------------------
+# Experiment Configuration
+# -----------------------------------------------------------------------------
+experiment:
+  # Name of the experiment (used for logging and directory naming)
+  name: "default_experiment"
+  # Output directory where results, logs, and backup configs will be stored.
+  output_dir: "output/experiment_01"
+
+# -----------------------------------------------------------------------------
+# Molecular Dynamics (MD) Parameters
+# Configuration for the MD engine (LAMMPS).
+# -----------------------------------------------------------------------------
 md_params:
-  # ・タイムステップ (fs)
-  #   MD積分の時間刻み。
-  #   推奨範囲: 0.5 - 2.0
-  #   デフォルト: 1.0
+  # Time step for MD integration in femtoseconds (fs).
+  # Recommended: 0.5 - 2.0
   timestep: 1.0
 
-  # ・温度 (K)
-  #   シミュレーションの目標温度。
-  #   設定範囲: > 0
-  #   デフォルト: 300.0
+  # Target temperature for the simulation in Kelvin (K).
   temperature: 300.0
 
-  # ・圧力 (bar)
-  #   NPTアンサンブルの場合の目標圧力。
-  #   デフォルト: 1.0 (大気圧)
-  #   ※ 現在の実装ではNVTが主ですが、将来的な拡張のために予約されています。
+  # Target pressure in bar (for NPT ensemble).
+  # Default: 1.0 (Atmospheric pressure)
   pressure: 1.0
 
-  # ・MDステップ数
-  #   1回のMDブロックで実行するステップ数。
-  #   推奨範囲: 1000 - 100000
-  #   デフォルト: 10000
+  # Number of MD steps per block/cycle.
+  # Recommended: 1000 - 100000
   n_steps: 10000
 
-  # ・元素リスト
-  #   系に含まれる元素記号のリスト。
-  #   例: ["Al", "Cu"], ["Si", "O"]
+  # List of chemical elements present in the system.
   elements: ["Al", "Cu"]
 
-  # ・初期構造ファイルパス
-  #   MDを開始する初期構造ファイル (LAMMPS data format推奨)。
-  #   例: "initial.data"
+  # Path to the initial atomic structure file (e.g., LAMMPS data format).
   initial_structure: "initial.data"
 
-  # ・原子質量辞書
-  #   各元素の質量 (g/mol)。LAMMPSのmass設定に使用されます。
+  # Atomic masses for each element in grams/mole.
   masses:
     Al: 26.98
     Cu: 63.55
 
-  # ・リスタートファイル出力頻度
-  #   restart.chk を書き出すステップ間隔。
-  #   デフォルト: 1000
+  # Frequency (in steps) to write restart files (restart.chk).
   restart_freq: 1000
 
-  # ・ダンプファイル出力頻度
-  #   dump.lammpstrj を書き出すステップ間隔。
-  #   デフォルト: 1000
+  # Frequency (in steps) to write trajectory dump files (dump.lammpstrj).
   dump_freq: 1000
 
-  # ・LAMMPS実行コマンド
-  #   LAMMPSを実行するためのシェルコマンド。MPI並列などを指定可能。
-  #   例: "lmp_serial", "mpirun -np 4 lmp_mpi"
-  #   デフォルト: "lmp_serial"
-  lammps_command: "lmp_serial"
-
-# ・アクティブラーニングパラメータ
-#   能動学習 (Active Learning) の閾値やサンプリング戦略を設定します。
+# -----------------------------------------------------------------------------
+# Active Learning (AL) Parameters
+# Strategies for sampling and uncertainty quantification.
+# -----------------------------------------------------------------------------
 al_params:
-  # ・不確実性閾値 (Gamma)
-  #   外挿グレード (Gamma) がこの値を超えた場合、MDを中断して再学習を行います。
-  #   推奨範囲: 0.05 - 0.3 (ACEポテンシャルの場合)
-  #   デフォルト: 0.1
+  # Uncertainty threshold (Gamma).
+  # If the max extrapolation grade exceeds this value, MD is halted for retraining.
+  # Recommended: 0.05 - 0.3
   gamma_threshold: 0.1
 
-  # ・クラスタサンプリング数
-  #   不確実性が高い構造からサンプリングする数。
-  #   推奨範囲: 1 - 20
-  #   デフォルト: 5
+  # Number of clusters to sample from high-uncertainty regions.
   n_clusters: 5
 
-  # ・コア半径 (Angstrom)
-  #   構造切り出し時に中心原子から「コア」として扱う半径。緩和時に固定されません。
-  #   推奨範囲: 3.0 - 6.0
-  #   デフォルト: 4.0
+  # Core radius (Angstrom) for cluster extraction.
+  # Atoms within this radius from the center are treated as the active core.
   r_core: 4.0
 
-  # ・ボックスサイズ (Angstrom)
-  #   切り出すスモールセルの立方体の一辺の長さ。
-  #   推奨範囲: 8.0 - 15.0 (相互作用カットオフの2倍以上推奨)
-  #   デフォルト: 12.0
+  # Size of the cubic box (Angstrom) carved out for labeling.
+  # Should be at least 2x the potential cutoff.
   box_size: 12.0
 
-  # ・初期ポテンシャルパス
-  #   シミュレーション開始時に使用する学習済みポテンシャルファイル (.yace)。
-  #   存在しない場合、Phase 1 (Seed Generation) がトリガーされます。
+  # Path to the initial trained potential (.yace).
+  # If missing, Phase 1 (Seed Generation) is triggered.
   initial_potential: "potential.yace"
 
-  # ・ポテンシャルYAML定義ファイル
-  #   ACEポテンシャルの基底関数セットなどを定義したYAMLファイル。
+  # Path to the potential definition file (.yaml) defining basis sets.
   potential_yaml_path: "potential.yaml"
 
-  # ・初期データセットパス (Optional)
-  #   初期学習に使用するデータセット (.pckl, .xyz 等)。
-  #   Seed Generation をスキップして既存データから始める場合に指定します。
+  # (Optional) Path to an initial dataset (.pckl) to bootstrap training.
   initial_dataset_path: "dataset.pckl"
 
-  # ・並列ラベリング数
-  #   DFT計算を並列実行する際のプロセス数。
-  #   計算リソースに応じて調整してください。
-  #   デフォルト: 4
+  # Number of parallel DFT calculations to run during labeling.
   num_parallel_labeling: 4
 
-# ・KMCシミュレーションパラメータ
-#   Kinetic Monte Carlo (kMC) の実行条件。MDと併用する場合に設定します。
+# -----------------------------------------------------------------------------
+# Kinetic Monte Carlo (KMC) Parameters
+# Configuration for off-lattice kMC acceleration.
+# -----------------------------------------------------------------------------
 kmc_params:
-  # ・KMC有効化フラグ
-  #   kMCを実行するかどうか。
-  #   デフォルト: false
+  # Enable or disable kMC.
   active: false
 
-  # ・KMC温度 (K)
-  #   遷移レート計算に使用する温度。MD温度と同じか、加速試験用に高く設定します。
-  #   デフォルト: 300.0
+  # Temperature for kMC rate calculations (K).
   temperature: 300.0
 
-  # ・探索回数
-  #   1回のkMCステップで並列探索するサドル点の数（ターゲット原子数）。
-  #   デフォルト: 10
+  # Number of saddle point searches (dimer method) per kMC step.
   n_searches: 10
 
-  # ・ワーカー数
-  #   並列探索を実行するプロセス数。
-  #   デフォルト: 4
+  # Number of parallel workers for saddle point searches.
   n_workers: 4
 
-  # ・活性種リスト
-  #   kMCの探索対象とする元素。表面原子や吸着原子を指定します。
-  #   例: ["Cu"], ["O"]
+  # List of active species to target for events (e.g., surface atoms).
   active_species: ["Cu"]
 
-# ・DFT計算パラメータ
-#   Quantum Espresso (QE) を用いたラベリング計算の設定です。
+# -----------------------------------------------------------------------------
+# DFT Parameters
+# Physics settings for Quantum Espresso calculations.
+# Note: Command and paths are now in meta_config.yaml.
+# -----------------------------------------------------------------------------
 dft_params:
-  # ・SSSP JSONデータベースパス
-  #   擬ポテンシャルのメタデータ (SSSP Precision/Efficiency) が記述されたJSONファイル。
-  #   必須項目
-  sssp_json_path: "SSSP_1.3.0_PBE_precision.json"
-
-  # ・擬ポテンシャルディレクトリ
-  #   UPFファイルが格納されているディレクトリ。
-  #   必須項目
-  pseudo_dir: "./pseudos"
-
-  # ・QE実行コマンド
-  #   pw.x を実行するためのコマンド。MPI設定を含めます。
-  #   例: "mpirun -np 4 pw.x", "pw.x"
-  #   必須項目
-  command: "mpirun -np 4 pw.x"
-
-  # ・K点密度 (Angstrom)
-  #   K点グリッドを生成する際の密度。値が小さいほど高精度（密なグリッド）。
-  #   推奨範囲: 0.15 - 0.25
-  #   デフォルト: 0.15
+  # K-point density for grid generation (1/Angstrom).
+  # Lower values mean denser grids.
+  # Recommended: 0.15 - 0.25
   kpoint_density: 0.15
 
-# ・構造生成シナリオ (Optional)
-#   Seed Generation フェーズで使用する構造生成レシピのリスト。
+# -----------------------------------------------------------------------------
+# Generation Parameters
+# Scenarios for Seed Generation (Phase 1).
+# -----------------------------------------------------------------------------
 generation:
   scenarios: []
+
+# -----------------------------------------------------------------------------
+# ACE Model Configuration (Pacemaker Pass-through)
+# Defines the potential architecture and training hyperparameters.
+# -----------------------------------------------------------------------------
+ace_model:
+  # List of base potentials to combine/start from (for multi-stage learning).
+  initial_potentials: []
+
+  # Pacemaker configuration dictionary.
+  # This structure mirrors the official Pacemaker input.yaml format.
+  pacemaker_config:
+    cutoff: 7.0
+    potential:
+      delta: true
+      elements: ["Al", "Cu"]
+      bonds:
+        N: 3
+        max_deg: 6
+        r0: 1.5
+        rad_base: "Chebyshev"
+        rad_parameters: [7.0]
+        r_in: 1.5
+      embeddings:
+        Al:
+          npot: "FinnisSinclair"
+          fs_parameters: [1, 1, 1, 0.5]
+          ndensity: 1
+        Cu:
+          npot: "FinnisSinclair"
+          fs_parameters: [1, 1, 1, 0.5]
+          ndensity: 1
+    fitting:
+      fit_cycles: 1
+      max_time: 3600
+      weighting:
+        type: "EnergyForce"
+        energy: 100.0
+        force: 1.0
+      ladder_step: []
+    backend:
+      evaluator: "tensorpot"
+      batch_size: 100
+    data:
+      test_size: 0.1
+
+# -----------------------------------------------------------------------------
+# Training Workflow Parameters
+# Settings for the active learning training loop (e.g. Experience Replay).
+# -----------------------------------------------------------------------------
+training_params:
+  # Ratio of old data to mix with new data (Experience Replay).
+  # 1.0 means 1:1 ratio of new:old.
+  replay_ratio: 1.0
+
+  # Path to the global dataset accumulating all training data.
+  global_dataset_path: "data/global_dataset.pckl"

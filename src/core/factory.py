@@ -61,7 +61,7 @@ class ComponentFactory:
         )
 
         return LAMMPSRunner(
-            cmd=self.config.md_params.lammps_command,
+            cmd=self.config.meta.lammps_command,
             input_generator=input_generator
         )
 
@@ -69,22 +69,11 @@ class ComponentFactory:
         """Helper to create DFT calculator with consistent settings using Configurator."""
         elements = self.config.md_params.elements
 
-        # We need a dummy atoms object for heuristics if we are creating a generic calculator.
-        # However, the configurator's build() method asks for atoms.
-        # The Labeler needs a calculator *instance* passed to it.
-        # But if the calculator settings depend on the atoms (e.g. Heuristics),
-        # we ideally need to re-configure per atoms in the Labeler.
-        # BUT, `Espresso` calculator in ASE is stateful.
-        # If we just return a pre-configured calculator here, it might not have the correct magnetism
-        # for a specific structure if the heuristics depend on that structure's composition (which is constant in a run usually).
-        # Assuming composition is constant (defined in md_params.elements), Heuristics based on element types are safe.
-        # Heuristics based on structure (e.g. geometry) are not used yet (only composition).
-
         # We create a dummy atoms object with all elements to let heuristics run once.
         from ase import Atoms
         dummy_atoms = Atoms(symbols=elements)
 
-        configurator = DFTConfigurator(self.config.dft_params)
+        configurator = DFTConfigurator(self.config.dft_params, self.config.meta)
         # Returns (calculator, magnetism_settings)
         return configurator.build(dummy_atoms, elements, kpts)
 
@@ -138,7 +127,7 @@ class ComponentFactory:
             r_core=self.config.al_params.r_core,
             box_size=self.config.al_params.box_size,
             stoichiometric_ratio=stoich_ratio,
-            lammps_cmd=self.config.md_params.lammps_command,
+            lammps_cmd=self.config.meta.lammps_command,
             min_bond_distance=self.config.al_params.min_bond_distance,
             stoichiometry_tolerance=self.config.al_params.stoichiometry_tolerance,
             # Pass LJ params for potential internal pre-optimization/checks
@@ -177,4 +166,7 @@ class ComponentFactory:
 
     def create_trainer(self) -> Trainer:
         """Creates the Trainer."""
-        return PacemakerTrainer(training_params=self.config.training_params)
+        return PacemakerTrainer(
+            ace_model_params=self.config.ace_model,
+            training_params=self.config.training_params
+        )

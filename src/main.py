@@ -6,6 +6,8 @@ then orchestrates the active learning loop.
 
 import logging
 import sys
+import argparse
+import shutil
 import random
 import numpy as np
 from pathlib import Path
@@ -71,29 +73,68 @@ class AppBuilder:
         return AppContext(orchestrator=orchestrator)
 
 
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="ACE Active Carver")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.yaml"),
+        help="Path to the main configuration file (default: config.yaml)"
+    )
+    parser.add_argument(
+        "--meta",
+        type=Path,
+        default=Path("meta_config.yaml"),
+        help="Path to the meta configuration file (default: meta_config.yaml)"
+    )
+    return parser.parse_args()
+
+
 def main():
     """Main execution entry point."""
-    # 1. Load Configuration
-    config_path = Path("config.yaml")
+    args = parse_arguments()
+    config_path = args.config
+    meta_path = args.meta
+
     if not config_path.exists():
-        logger.error("config.yaml not found.")
+        logger.error(f"Config file not found: {config_path}")
         sys.exit(1)
 
+    if not meta_path.exists():
+        logger.error(f"Meta config file not found: {meta_path}")
+        sys.exit(1)
+
+    # 1. Load Configuration
     try:
-        config = Config.from_yaml(config_path)
+        # Load Meta first (L0)
+        meta_config = Config.load_meta(meta_path)
+        # Load Experiment/System (L1) and inject Meta
+        config = Config.load_experiment(config_path, meta_config)
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
 
-    # 2. Reproducibility: Set Global Random Seed
-    # Use default 42 if not specified, though config should probably have it.
+    # 2. Experiment Setup (Directory & Backup)
+    output_dir = config.experiment.output_dir
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Backup configuration files for reproducibility
+        shutil.copy(config_path, output_dir / "config.yaml.backup")
+        shutil.copy(meta_path, output_dir / "meta_config.yaml.backup")
+        logger.info(f"Initialized experiment '{config.experiment.name}' at {output_dir}")
+        logger.info("Configuration files backed up.")
+    except Exception as e:
+        logger.error(f"Failed to setup experiment directory {output_dir}: {e}")
+        sys.exit(1)
+
+    # 3. Reproducibility: Set Global Random Seed
     seed = getattr(config, "seed", 42)
     logger.info(f"Setting global random seed to {seed}")
     random.seed(seed)
     np.random.seed(seed)
 
-    # 3. Check Phase 1 Requirement (Seed Generation)
-    # This logic remains slightly procedural as it decides WHICH app to run.
+    # 4. Check Phase 1 Requirement (Seed Generation)
     initial_pot_path = Path(config.al_params.initial_potential)
     if not initial_pot_path.exists():
         logger.info(f"Initial potential not found at {initial_pot_path}. Starting Phase 1: Seed Generation.")
@@ -108,7 +149,6 @@ def main():
 
             if generated_pot.resolve() != initial_pot_path.resolve():
                 logger.info(f"Copying generated potential to configured path: {initial_pot_path}")
-                import shutil
                 shutil.copy(generated_pot, initial_pot_path)
 
         except Exception as e:
@@ -117,7 +157,7 @@ def main():
     else:
         logger.info("Initial potential found. Skipping Phase 1.")
 
-    # 4. Build and Run Phase 2 Application
+    # 5. Build and Run Phase 2 Application
     logger.info("Initializing Phase 2 Application...")
     app_context = AppBuilder(config).build()
     
