@@ -27,6 +27,7 @@ class LAMMPSInputGenerator:
         epsilon = self.lj_params.get("epsilon", 1.0)
         sigma = self.lj_params.get("sigma", 1.0)
         rcut = self.lj_params.get("cutoff", 2.5)
+        shift_energy = self.lj_params.get("shift_energy", True) # Default to True for safety
 
         elements = self.md_params.get("elements", [])
         element_map = " ".join(elements)
@@ -60,7 +61,12 @@ class LAMMPSInputGenerator:
         lines.append(f"pair_style hybrid/overlay pace/extrapolation lj/cut {rcut}")
         lines.append(f"pair_coeff * * pace/extrapolation {potential_path} {element_map}")
         lines.append(f"pair_coeff * * lj/cut {epsilon} {sigma}")
-        lines.append("pair_modify shift yes")
+
+        # Enforce consistency with Python side ShiftedLennardJones
+        if shift_energy:
+            lines.append("pair_modify shift yes")
+        else:
+            lines.append("pair_modify shift no")
 
         lines.append("neighbor 1.0 bin")
         lines.append("neigh_modify delay 0 every 1 check yes")

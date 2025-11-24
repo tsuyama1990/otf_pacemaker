@@ -1,12 +1,23 @@
 """Shifted Lennard-Jones Calculator."""
 
 import numpy as np
-from typing import Optional
+from typing import Optional, Dict, Any
 from ase import Atoms
 from ase.calculators.lj import LennardJones
 
 class ShiftedLennardJones(LennardJones):
     """LennardJones calculator with potential shift to ensure V(rc) = 0."""
+
+    def __init__(self, shift_energy: bool = True, **kwargs):
+        """Initialize ShiftedLennardJones.
+
+        Args:
+            shift_energy: If True, shift the potential energy so that V(rc) = 0.
+                          Defaults to True.
+            **kwargs: Arguments passed to LennardJones (epsilon, sigma, rc, etc.).
+        """
+        self.shift_energy = shift_energy
+        super().__init__(**kwargs)
 
     def calculate(
         self,
@@ -14,7 +25,7 @@ class ShiftedLennardJones(LennardJones):
         properties=None,
         system_changes=None
     ):
-        """Calculate properties, applying energy shift."""
+        """Calculate properties, conditionally applying energy shift."""
         if properties is None:
             properties = ['energy']
         if system_changes is None:
@@ -22,7 +33,7 @@ class ShiftedLennardJones(LennardJones):
 
         super().calculate(atoms, properties, system_changes)
 
-        if 'energy' in self.results:
+        if self.shift_energy and 'energy' in self.results:
             epsilon = self.parameters.get('epsilon', 1.0)
             sigma = self.parameters.get('sigma', 1.0)
             rc = self.parameters.get('rc')

@@ -36,12 +36,16 @@ class ComponentFactory:
 
     def create_md_engine(self) -> MDEngine:
         """Creates the Molecular Dynamics Engine."""
+        # Use shift_energy from lj_params
+        lj_params = {
+            "epsilon": self.config.lj_params.epsilon,
+            "sigma": self.config.lj_params.sigma,
+            "cutoff": self.config.lj_params.cutoff,
+            "shift_energy": self.config.lj_params.shift_energy
+        }
+
         input_generator = LAMMPSInputGenerator(
-            lj_params={
-                "epsilon": self.config.lj_params.epsilon,
-                "sigma": self.config.lj_params.sigma,
-                "cutoff": self.config.lj_params.cutoff
-            },
+            lj_params=lj_params,
             md_params={
                 "elements": self.config.md_params.elements,
                 "timestep": self.config.md_params.timestep,
@@ -67,8 +71,6 @@ class ComponentFactory:
 
     def create_sampler(self) -> Sampler:
         """Creates the Active Learning Sampler."""
-        # Currently hardcoded to MaxGammaSampler as per previous main.py
-        # Could be configurable via config.al_params.query_strategy
         return MaxGammaSampler()
 
     def create_generator(self) -> StructureGenerator:
@@ -106,7 +108,7 @@ class ComponentFactory:
         ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
         logger.info(f"Using SSSP cutoffs: ecutwfc={ecutwfc} Ry, ecutrho={ecutrho} Ry")
 
-        default_kpts = (3, 3, 3) # Todo: Dynamic
+        default_kpts = (3, 3, 3)
 
         qe_input_data = {
             "control": {
@@ -139,7 +141,8 @@ class ComponentFactory:
         lj_kwargs = {
             'epsilon': self.config.lj_params.epsilon,
             'sigma': self.config.lj_params.sigma,
-            'rc': self.config.lj_params.cutoff
+            'rc': self.config.lj_params.cutoff,
+            'shift_energy': self.config.lj_params.shift_energy
         }
         lj_calculator = ShiftedLennardJones(**lj_kwargs)
 
@@ -150,4 +153,4 @@ class ComponentFactory:
 
     def create_trainer(self) -> Trainer:
         """Creates the Trainer."""
-        return PacemakerTrainer()
+        return PacemakerTrainer(training_params=self.config.training_params)

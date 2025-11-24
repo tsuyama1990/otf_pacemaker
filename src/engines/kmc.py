@@ -21,7 +21,6 @@ from ase.constraints import FixAtoms
 try:
     from pyace import PyACECalculator
 except ImportError:
-    # Fallback for environments where pyace is not installed (e.g. testing)
     PyACECalculator = None
 
 # Numba Handling
@@ -37,14 +36,14 @@ from src.core.config import KMCParams, ALParams
 
 logger = logging.getLogger(__name__)
 
-# Constants (Externalized)
-KB_EV = constants.k / constants.e  # Boltzmann constant in eV/K ~ 8.617e-5
+# Constants using scipy.constants
+# constants.k is in J/K
+# constants.e is elementary charge in C (1 eV = 1.602e-19 J)
+# kB in eV/K = k (J/K) / e (J/eV)
+KB_EV = constants.k / constants.e
 
 def _setup_calculator(atoms: Atoms, potential_path: str):
-    """Attach the Pacemaker calculator to the atoms.
-
-    Helper function for workers.
-    """
+    """Attach the Pacemaker calculator to the atoms."""
     if PyACECalculator is None:
         if hasattr(atoms, "calc") and atoms.calc is not None:
             return
@@ -63,9 +62,6 @@ if HAS_NUMBA:
         cn_cutoff: int,
         num_atoms: int
     ) -> np.ndarray:
-        """
-        BFS traversal using Numba.
-        """
         visited = np.zeros(num_atoms, dtype=np.bool_)
         visited[start_node] = True
 
@@ -112,29 +108,18 @@ def _bfs_traversal_scipy(
     cn_cutoff: int,
     num_atoms: int
 ) -> np.ndarray:
-    """
-    BFS traversal using Scipy (Fallback).
-    Explicit implementation to ensure performance when Numba is missing.
-    """
-    # Create valid mask
     valid_mask = cns < cn_cutoff
-    # Start node is assumed valid by caller (or we check)
     if not valid_mask[start_node]:
         return np.array([start_node], dtype=np.int32)
 
     data = np.ones(len(indices), dtype=np.int8)
     adj = sparse.csr_matrix((data, indices, indptr), shape=(num_atoms, num_atoms))
 
-    # We want to restrict traversal to 'valid_mask' nodes.
-    # M' = D * M * D where D is diagonal matrix with 1 for valid, 0 for invalid.
     diag_data = valid_mask.astype(np.int8)
     D = sparse.diags(diag_data)
 
-    # Filtered Adjacency
     adj_filtered = D @ adj @ D
 
-    # Now BFS
-    # breadth_first_order returns (node_array, predecessors)
     nodes, _ = sparse.csgraph.breadth_first_order(
         adj_filtered,
         i_start=start_node,
@@ -149,20 +134,11 @@ class OffLatticeKMCEngine(KMCEngine):
     """Off-Lattice KMC Engine with k-step uncertainty checking and Numba optimization."""
 
     def __init__(self, kmc_params: KMCParams, al_params: ALParams):
-        """Initialize the KMC Engine.
-
-        Args:
-            kmc_params: KMC configuration parameters.
-            al_params: Active Learning parameters (for gamma threshold).
-        """
         self.kmc_params = kmc_params
         self.al_params = al_params
 
         if not HAS_NUMBA:
-            # As per requirements: "Numba非依存時の明示的なエラーハンドリングまたはScipy代替実装"
-            # We are providing the Scipy alternative, but let's log explicitly.
             logger.warning("Numba not installed. Using Scipy fallback for graph traversal.")
-            # Verify scipy is available
             try:
                 import scipy.sparse.csgraph
             except ImportError:
@@ -176,13 +152,12 @@ class OffLatticeKMCEngine(KMCEngine):
         indptr: np.ndarray,
         cns: np.ndarray
     ) -> List[int]:
-        """Identify the connected cluster using Numba-optimized BFS or Scipy fallback."""
-
-        # Check center first
         if cns[center_idx] >= self.kmc_params.adsorbate_cn_cutoff:
              return [center_idx]
 
-        if HAS_NUMBA:
+        # For testing, we might patch HAS_NUMBA but _bfs_traversal_numba might not be defined
+        # if actual import failed. So we check existence of function.
+        if HAS_NUMBA and '_bfs_traversal_numba' in globals():
             cluster_arr = _bfs_traversal_numba(
                 center_idx,
                 indices,
@@ -192,7 +167,6 @@ class OffLatticeKMCEngine(KMCEngine):
                 len(atoms)
             )
         else:
-            # Fallback to Scipy implementation
             cluster_arr = _bfs_traversal_scipy(
                 center_idx,
                 indices,
@@ -209,10 +183,8 @@ class OffLatticeKMCEngine(KMCEngine):
         full_atoms: Atoms,
         moving_indices: List[int]
     ) -> Tuple[Atoms, List[int]]:
-        """Carve a cubic cluster around the moving molecule and apply strict fixing."""
         box_size = self.kmc_params.box_size
 
-        # 1. Calculate Geometric Center
         cluster_pos = full_atoms.positions[moving_indices]
         if full_atoms.pbc.any():
             ref_pos = cluster_pos[0]
@@ -226,8 +198,6 @@ class OffLatticeKMCEngine(KMCEngine):
             cluster_pos = ref_pos + d
 
         center_pos = np.mean(cluster_pos, axis=0)
-
-        # 2. Extract Atoms
         vectors = full_atoms.positions - center_pos
 
         if full_atoms.pbc.any():
@@ -244,13 +214,11 @@ class OffLatticeKMCEngine(KMCEngine):
         cluster_indices = np.where(mask)[0]
         cluster = full_atoms[mask].copy()
 
-        # 3. Center and Disable PBC
         extracted_vectors = vectors[mask]
         cluster.positions = extracted_vectors + half_box
         cluster.set_cell([box_size, box_size, box_size])
         cluster.set_pbc(False)
 
-        # 4. Strict Fixed Boundary
         global_to_local = {global_idx: local_idx for local_idx, global_idx in enumerate(cluster_indices)}
 
         indices_to_fix = []
@@ -273,15 +241,12 @@ class OffLatticeKMCEngine(KMCEngine):
         cns: np.ndarray,
         seed: int
     ) -> Union[KMCResult, Tuple[float, np.ndarray, List[int]]]:
-        """Worker function for single search."""
         np.random.seed(seed)
 
-        # 1. Identify Cluster
         moving_indices = self._identify_moving_cluster(
             full_atoms_snapshot, target_idx, indices, indptr, cns
         )
 
-        # 2. Carve
         cluster, index_map = self._carve_cluster(full_atoms_snapshot, moving_indices)
 
         local_moving_indices = []
@@ -294,7 +259,6 @@ class OffLatticeKMCEngine(KMCEngine):
 
         _setup_calculator(cluster, potential_path)
 
-        # 3. Perturb (Cooperative Move)
         search_atoms = cluster.copy()
         _setup_calculator(search_atoms, potential_path)
 
@@ -304,7 +268,6 @@ class OffLatticeKMCEngine(KMCEngine):
             noise = np.random.normal(0, self.kmc_params.search_radius * 0.2, 3)
             search_atoms.positions[idx] += coherent_disp + noise
 
-        # 4. Dimer Search
         dimer_control = DimerControl(
             logfile=None,
             eigenmode_method='displacement',
@@ -331,7 +294,6 @@ class OffLatticeKMCEngine(KMCEngine):
                 converged = True
                 break
 
-            # Check Uncertainty
             try:
                 calc = search_atoms.calc
                 gamma_vals = None
@@ -375,7 +337,6 @@ class OffLatticeKMCEngine(KMCEngine):
 
 
     def select_active_candidates(self, atoms: Atoms, cns: np.ndarray) -> np.ndarray:
-        """Select candidate atoms for KMC searches based on configuration."""
         species_mask = np.ones(len(atoms), dtype=bool)
         surface_mask = np.ones(len(atoms), dtype=bool)
 
@@ -397,8 +358,6 @@ class OffLatticeKMCEngine(KMCEngine):
         return candidate_indices
 
     def run_step(self, initial_atoms: Atoms, potential_path: str) -> KMCResult:
-        """Run a single KMC step."""
-
         atoms = initial_atoms.copy()
         _setup_calculator(atoms, potential_path)
 
@@ -471,8 +430,10 @@ class OffLatticeKMCEngine(KMCEngine):
              return KMCResult(status=KMCStatus.NO_EVENT, structure=initial_atoms)
 
         # Rate Calculation
-        k_B = KB_EV
+        k_B = KB_EV # eV/K from scipy.constants
         T = self.kmc_params.temperature
+
+        # Prefactor from config
         v = self.kmc_params.prefactor
 
         rates = []

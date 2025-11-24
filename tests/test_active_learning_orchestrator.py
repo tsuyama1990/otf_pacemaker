@@ -7,7 +7,7 @@ from typing import List, Tuple
 
 from src.sampling.strategies.max_vol import MaxVolSampler
 from src.workflows.orchestrator import ActiveLearningOrchestrator
-from src.core.config import Config, MDParams, ALParams, DFTParams, LJParams
+from src.core.config import Config, MDParams, ALParams, DFTParams, LJParams, TrainingParams
 from src.core.enums import SimulationState
 from src.core.interfaces import MDEngine, StructureGenerator, Labeler, Trainer
 
@@ -86,7 +86,8 @@ def test_orchestrator_initial_asi_generation(mock_read, mock_exists, mock_mkdir,
         ),
         # Updated DFTParams to match definition in config.py
         dft_params=DFTParams(sssp_json_path="sssp.json", pseudo_dir=".", command="pw.x"),
-        lj_params=LJParams(epsilon=1.0, sigma=1.0, cutoff=2.5)
+        lj_params=LJParams(epsilon=1.0, sigma=1.0, cutoff=2.5),
+        training_params=TrainingParams()
     )
 
     # Mocks
