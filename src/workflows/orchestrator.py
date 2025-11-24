@@ -69,19 +69,20 @@ class ActiveLearningOrchestrator:
         self.trainer = trainer
         self.csv_logger = csv_logger or CSVLogger()
         self.max_workers = config.al_params.num_parallel_labeling
-        self.state_file = Path("orchestrator_state.json")
 
-    def _save_state(self, state: Dict[str, Any]):
+    def _save_state(self, base_dir: Path, state: Dict[str, Any]):
         """Save the current orchestrator state to a JSON file."""
-        with open(self.state_file, 'w') as f:
+        state_file = base_dir / "orchestrator_state.json"
+        with open(state_file, 'w') as f:
             json.dump(state, f, indent=4)
 
-    def _load_state(self) -> Dict[str, Any]:
+    def _load_state(self, base_dir: Path) -> Dict[str, Any]:
         """Load the orchestrator state from a JSON file."""
-        if self.state_file.exists():
-            with open(self.state_file, 'r') as f:
+        state_file = base_dir / "orchestrator_state.json"
+        if state_file.exists():
+            with open(state_file, 'r') as f:
                 return json.load(f)
-        return {}
+        return {"iteration": 0, "current_potential": None, "current_asi": None}
 
     def _label_clusters_parallel(self, clusters: List[Atoms]) -> List[Atoms]:
         """Label clusters in parallel using ProcessPoolExecutor."""
@@ -159,25 +160,23 @@ class ActiveLearningOrchestrator:
         return new_potential
 
     def run(self):
-        """Executes the active learning loop (Hybrid MD-kMC) with state persistence."""
+        """Executes the active learning loop (Hybrid MD-kMC) with robust state persistence."""
+
+        data_root = Path("data")
+        data_root.mkdir(parents=True, exist_ok=True)
 
         # --- State Initialization ---
-        saved_state = self._load_state()
+        state = self._load_state(data_root)
+        iteration = state["iteration"]
 
-        if saved_state:
-            logger.info("Resuming from saved state.")
-            iteration = saved_state.get("iteration", 1)
-            current_potential = saved_state.get("current_potential")
-            current_structure = saved_state.get("current_structure")
-            current_asi = saved_state.get("current_asi")
-            is_restart = saved_state.get("is_restart", True)
-        else:
-            logger.info("Starting new simulation.")
-            iteration = 1 # Start from 1
-            current_potential = self.config.al_params.initial_potential
-            current_structure = self.config.md_params.initial_structure
-            current_asi = self.config.al_params.initial_active_set_path
-            is_restart = False
+        # Restore potential or use initial
+        current_potential = state.get("current_potential") or self.config.al_params.initial_potential
+        current_asi = state.get("current_asi") or self.config.al_params.initial_active_set_path
+
+        # Restore other state variables
+        current_structure = state.get("current_structure") or self.config.md_params.initial_structure
+        is_restart = state.get("is_restart", False)
+        al_consecutive_counter = state.get("al_consecutive_counter", 0)
 
         original_cwd = Path.cwd()
 
@@ -187,8 +186,8 @@ class ActiveLearningOrchestrator:
         if self.config.al_params.initial_dataset_path:
              initial_dataset_path = self._resolve_path(self.config.al_params.initial_dataset_path, original_cwd)
 
-        # 0. Initialize Active Set if needed
-        if not current_asi and initial_dataset_path and iteration == 1:
+        # 0. Initialize Active Set if needed (First Run)
+        if not current_asi and initial_dataset_path and iteration == 0:
              logger.info("No initial Active Set provided. Generating from initial dataset...")
              try:
                  init_dir = original_cwd / "data" / "seed"
@@ -198,15 +197,8 @@ class ActiveLearningOrchestrator:
                  current_asi = self.trainer.update_active_set(str(initial_dataset_path), str(potential_yaml_path))
                  logger.info(f"Initial Active Set generated: {current_asi}")
 
-                 # Save initial state
-                 self._save_state({
-                     "iteration": iteration,
-                     "current_potential": current_potential,
-                     "current_structure": current_structure,
-                     "current_asi": current_asi,
-                     "is_restart": is_restart
-                 })
-
+                 # Update state locally, will be saved in loop
+                 state["current_asi"] = current_asi
                  os.chdir(original_cwd)
              except Exception as e:
                  logger.error(f"Failed to generate initial active set: {e}")
@@ -214,34 +206,23 @@ class ActiveLearningOrchestrator:
                  return
 
         while True:
-            # Check for max_al_retries loop (Prevent Infinite Loop)
-            # Implemented per-iteration retry counter? No, "Same iteration max retries"
-            # Since iteration increments on loop, we track retries within the loop or strictly increment iteration for every MD run.
-            # Let's track retries in state if we want persistence, or just increment iteration.
-            # The prompt says: "max_al_retries counter ... if retraining > 3 times in same iteration -> Error"
-            # This implies we loop INSIDE the iteration for retries or we don't increment iteration.
-            # My current loop increments iteration at start.
+            iteration += 1
 
-            # Let's assume standard behavior:
-            # 1 Iteration = 1 MD Block (+ potential AL).
-            # If AL happens, we might stay in the same iteration conceptually or move to next.
-            # Usually we move to next. But if we fail immediately again, we are in a loop.
-            # Let's count consecutive AL triggers.
+            # Atomic state update
+            state["iteration"] = iteration
+            state["current_potential"] = current_potential
+            state["current_structure"] = current_structure
+            state["current_asi"] = current_asi
+            state["is_restart"] = is_restart
+            state["al_consecutive_counter"] = al_consecutive_counter
 
-            al_consecutive_counter = saved_state.get("al_consecutive_counter", 0)
+            self._save_state(data_root, state)
 
-            work_dir = Path(f"data/iteration_{iteration}")
+            work_dir = data_root / f"iteration_{iteration}"
+            if work_dir.exists():
+                 logger.warning(f"Resuming or overwriting existing iteration directory: {iteration}")
+
             work_dir.mkdir(parents=True, exist_ok=True)
-
-            # Update State on disk
-            self._save_state({
-                "iteration": iteration,
-                "current_potential": current_potential,
-                "current_structure": current_structure,
-                "current_asi": current_asi,
-                "is_restart": is_restart,
-                "al_consecutive_counter": al_consecutive_counter
-            })
 
             logger.info(f"--- Starting Iteration {iteration} (AL Retries: {al_consecutive_counter}) ---")
 
@@ -263,16 +244,16 @@ class ActiveLearningOrchestrator:
                     break
 
                 logger.info("Running MD...")
-                state = self.md_engine.run(
+                sim_state = self.md_engine.run(
                     potential_path=str(abs_potential_path),
                     steps=self.config.md_params.n_steps,
                     gamma_threshold=self.config.al_params.gamma_threshold,
                     input_structure=input_structure_arg,
                     is_restart=is_restart
                 )
-                logger.info(f"MD Finished with state: {state}")
+                logger.info(f"MD Finished with state: {sim_state}")
 
-                if state == SimulationState.UNCERTAIN:
+                if sim_state == SimulationState.UNCERTAIN:
                     # Check safety valve
                     if al_consecutive_counter >= 3:
                         raise RuntimeError("Max AL retries reached. Infinite loop detected.")
@@ -298,13 +279,13 @@ class ActiveLearningOrchestrator:
                             current_asi = str(new_asi.resolve())
 
                         # Increment counters
-                        iteration += 1
+                        # Note: Loop increments iteration, so we continue to next iteration number but with 'is_restart=True'
                         al_consecutive_counter += 1
-                        continue # Restart loop
+                        continue
                     else:
                         break # AL failed
 
-                elif state == SimulationState.FAILED:
+                elif sim_state == SimulationState.FAILED:
                     logger.error("MD Failed.")
                     break
 
@@ -343,7 +324,7 @@ class ActiveLearningOrchestrator:
 
                         current_structure = str(next_input_file.resolve())
                         is_restart = False
-                        iteration += 1
+                        # Loop continues to next iteration
 
                     elif kmc_result.status == KMCStatus.UNCERTAIN:
                         logger.info("KMC detected uncertainty. Triggering AL.")
@@ -361,7 +342,6 @@ class ActiveLearningOrchestrator:
                                 current_asi = str(new_asi.resolve())
 
                             is_restart = True # Resume from where we were
-                            iteration += 1
                             al_consecutive_counter += 1
                             continue
                         else:
@@ -370,14 +350,12 @@ class ActiveLearningOrchestrator:
                     elif kmc_result.status == KMCStatus.NO_EVENT:
                         logger.info("KMC found no event. Continuing MD.")
                         is_restart = True
-                        iteration += 1
+                        # Loop continues
 
                 else:
-                    if state == SimulationState.COMPLETED:
+                    if sim_state == SimulationState.COMPLETED:
                         logger.info("MD block completed. Continuing...")
                         is_restart = True
-                        iteration += 1
-
 
             except Exception as e:
                 logger.exception(f"An error occurred in iteration {iteration}: {e}")
@@ -402,32 +380,28 @@ class ActiveLearningOrchestrator:
 
         if is_restart:
             # Look in previous iterations for restart.chk
-            # Since we increment iteration at the end of the loop,
-            # "iteration" variable is the CURRENT new iteration.
-            # We want to restart from the PREVIOUS one.
-
-            # Simple heuristic: scan backwards from iteration-1
+            # Since iteration is the CURRENT one, we look at iteration-1 for restart file.
             search_start = iteration - 1
             if search_start < 1:
-                # No previous iteration, maybe initial structure?
-                # But is_restart=True usually implies we ran at least once.
-                # Or we are resuming a crashed run in iter 1.
-                # If we are in iter 1 and restart is true, we look in iter 1?
                 pass
 
-            prev_dir = base_cwd / f"data/iteration_{search_start}"
+            prev_dir = base_cwd / "data" / f"iteration_{search_start}"
             restart_file = prev_dir / "restart.chk"
 
             if not restart_file.exists():
                 # Check current dir (if we crashed mid-way and are resuming same iter)
-                curr_dir = base_cwd / f"data/iteration_{iteration}"
-                curr_restart = curr_dir / "restart.chk"
-                if curr_restart.exists():
-                    return str(curr_restart)
+                # But logic now starts new iter folder.
+                # If we resume, we loaded iteration X from state, and now we are at X+1.
+                # Wait, if we resume:
+                # State says iteration = 10.
+                # Loop starts: iteration = 11.
+                # work_dir = iteration_11.
+                # We need restart.chk from iteration_10.
+                pass
 
             if not restart_file.exists():
-                 # Maybe we have KMC output from previous?
-                 # But that would be caught by the first if block (current_structure updated).
+                # Fallback: maybe we are just continuing from a non-MD step or something specific
+                # For now, log error
                  logger.error(f"Restart file missing for resume: {restart_file}")
                  return None
             return str(restart_file)
