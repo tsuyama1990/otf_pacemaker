@@ -74,6 +74,8 @@ class ALParams:
     min_bond_distance: float = 1.5
     num_parallel_labeling: int = 4
     query_strategy: str = "uncertainty"
+    sampling_strategy: str = "composite"
+    outlier_energy_max: float = 10.0
 
 
 @dataclass
@@ -107,6 +109,7 @@ class DFTParams:
     pseudo_dir: str
     command: str
     kpoint_density: float = 60.0
+    auto_physics: bool = True
 
 
 @dataclass
@@ -147,6 +150,7 @@ class TrainingParams:
     test_size: float = 0.1
     energy_weight: float = 100.0
     force_weight: float = 1.0
+    ace_inner_cutoff: float = 1.5
 
     # Ladder Strategy
     ladder_strategy: bool = False
@@ -186,7 +190,7 @@ class Config:
             lj_dict = generate_default_lj_params(elements)
 
         dft_dict = config_dict.get("dft_params", {}).copy()
-        allowed_dft_keys = {"sssp_json_path", "pseudo_dir", "command", "kpoint_density"}
+        allowed_dft_keys = {"sssp_json_path", "pseudo_dir", "command", "kpoint_density", "auto_physics"}
         dft_dict = {k: v for k, v in dft_dict.items() if k in allowed_dft_keys}
 
         return cls(

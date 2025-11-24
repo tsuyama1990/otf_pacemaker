@@ -267,6 +267,7 @@ class PacemakerTrainer(Trainer):
                 "r0": 1.5,
                 "rad_base": "Chebyshev",
                 "rad_parameters": [self.params.ace_cutoff],
+                "r_in": self.params.ace_inner_cutoff,
             }
             config["potential"]["embeddings"] = {
                  el: {
