@@ -37,17 +37,18 @@ def generate_default_lj_params(elements: List[str]) -> Dict[str, float]:
         return {
             "epsilon": 1.0,
             "sigma": float(round(sigma, 3)),
-            "cutoff": float(round(2.5 * sigma, 3))
+            "cutoff": float(round(2.5 * sigma, 3)),
+            "shift_energy": True
         }
     except Exception as e:
         print(f"Warning: Could not auto-generate LJ params ({e}). Using safe defaults.")
-        return {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
+        return {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0, "shift_energy": True}
 
 @dataclass
 class MetaConfig:
-    """Environment-specific configuration."""
-    dft: Dict[str, Any]
-    lammps: Dict[str, Any]
+    """Environment-specific configuration (Infrastructure Layer)."""
+    dft: Dict[str, Any] = field(default_factory=dict)
+    lammps: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def dft_command(self) -> str:
@@ -65,10 +66,28 @@ class MetaConfig:
     def lammps_command(self) -> str:
         return self.lammps.get("command", "lmp_serial")
 
+    @classmethod
+    def load_meta(cls, path: Path) -> "MetaConfig":
+        """Load environment configuration from meta_config.yaml."""
+        if not path.exists():
+             # Return default/empty if not found, or raise?
+             # Per requirements, we should load it if it exists.
+             # But main.py checks existence. Here we can be lenient or strict.
+             # Let's be strict if called explicitly.
+             raise FileNotFoundError(f"Meta config file not found: {path}")
+
+        with path.open("r", encoding="utf-8") as f:
+            meta_dict = yaml.safe_load(f) or {}
+
+        return cls(
+            dft=meta_dict.get("dft", {}),
+            lammps=meta_dict.get("lammps", {})
+        )
+
 
 @dataclass
 class ExperimentConfig:
-    """Experiment metadata and output settings."""
+    """Experiment metadata and output settings (Experiment Layer)."""
     name: str
     output_dir: Path
 
@@ -85,7 +104,6 @@ class MDParams:
     masses: dict[str, float]
     restart_freq: int = 1000
     dump_freq: int = 1000
-    # lammps_command removed, now in MetaConfig
 
 
 @dataclass
@@ -136,7 +154,6 @@ class DFTParams:
     """Parameters for Density Functional Theory calculations."""
     kpoint_density: float = 60.0
     auto_physics: bool = True
-    # command, pseudo_dir, sssp_json_path removed, now in MetaConfig
 
 
 @dataclass
@@ -168,7 +185,7 @@ class GenerationParams:
 
 @dataclass
 class ACEModelParams:
-    """Parameters for Pacemaker potential model."""
+    """Parameters for Pacemaker potential model (Pass-through)."""
     pacemaker_config: Dict[str, Any] = field(default_factory=dict)
     initial_potentials: List[str] = field(default_factory=list)
 
@@ -178,7 +195,6 @@ class TrainingParams:
     """Parameters for Active Learning Training strategy."""
     replay_ratio: float = 1.0
     global_dataset_path: str = "data/global_dataset.pckl"
-    # Pacemaker-specific params removed, moved to ACEModelParams.pacemaker_config
 
 
 @dataclass
@@ -195,20 +211,6 @@ class Config:
     seed: int = 42
     kmc_params: KMCParams = field(default_factory=KMCParams)
     generation_params: GenerationParams = field(default_factory=GenerationParams)
-
-    @classmethod
-    def load_meta(cls, path: Path) -> MetaConfig:
-        """Load environment configuration from meta_config.yaml."""
-        if not path.exists():
-             raise FileNotFoundError(f"Meta config file not found: {path}")
-
-        with path.open("r", encoding="utf-8") as f:
-            meta_dict = yaml.safe_load(f) or {}
-
-        return MetaConfig(
-            dft=meta_dict.get("dft", {}),
-            lammps=meta_dict.get("lammps", {})
-        )
 
     @classmethod
     def load_experiment(cls, config_path: Path, meta_config: MetaConfig) -> "Config":
@@ -266,6 +268,9 @@ class Config:
         exp_dict = config_dict.get("experiment", {})
 
         ace_dict = config_dict.get("ace_model", {})
+        # Ensure initial_potentials is a list
+        if "initial_potentials" in ace_dict and isinstance(ace_dict["initial_potentials"], str):
+             ace_dict["initial_potentials"] = [ace_dict["initial_potentials"]]
 
         return cls(
             meta=meta_config,

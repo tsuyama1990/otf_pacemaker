@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
 from ase import Atoms
+import copy
 
 from src.core.interfaces import Trainer
 from src.core.config import TrainingParams, ACEModelParams
@@ -182,14 +183,14 @@ class PacemakerTrainer(Trainer):
 
         # 3. Base Config from Pass-through
         # Deep copy to avoid modifying the original config object
-        config = yaml.safe_load(yaml.safe_dump(self.ace_params.pacemaker_config))
+        config = copy.deepcopy(self.ace_params.pacemaker_config)
 
         # 4. Mandatory Overrides
         # Data path
         config.setdefault("data", {})
         config["data"]["filename"] = mixed_dataset_path
 
-        # Elements inference if not present (Optional, prompt said override but usually redundant if input_potential is used)
+        # Elements inference if not present
         if "potential" not in config:
              config["potential"] = {}
 
@@ -217,15 +218,14 @@ class PacemakerTrainer(Trainer):
 
         if input_pots:
              config.setdefault("fitting", {})
-             # If only one potential, can be string or list. Pacemaker supports list for mixing?
-             # Actually Pacemaker documentation says input_potential can be a list for mixing.
-             # If it's a single potential, we can pass it as a string or single-item list.
-             # We pass as list to be robust if the backend supports it,
-             # but check if we should unwrap if len==1 for safety.
-             if len(input_pots) == 1:
-                 config["fitting"]["input_potential"] = input_pots[0]
+             # Remove duplicates while preserving order
+             seen = set()
+             unique_input_pots = [x for x in input_pots if not (x in seen or seen.add(x))]
+
+             if len(unique_input_pots) == 1:
+                 config["fitting"]["input_potential"] = unique_input_pots[0]
              else:
-                 config["fitting"]["input_potential"] = input_pots
+                 config["fitting"]["input_potential"] = unique_input_pots
 
         # 6. Write Input File
         input_yaml_path = "input.yaml"

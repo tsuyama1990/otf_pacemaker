@@ -7,12 +7,12 @@ md_params:
   pressure: 0.0
   n_steps: 5000
   elements: &id001
-  - Cu
   - Al
+  - Cu
   initial_structure: data/initial.xyz
   masses:
-    Cu: 1.0
     Al: 1.0
+    Cu: 1.0
   restart_freq: 1000
   dump_freq: 1000
 al_params:
@@ -37,10 +37,10 @@ kmc_params:
   active_species: *id001
 ace_model:
   pacemaker_config:
-    cutoff: 4.5
+    cutoff: 4.0
     b_basis:
       max_deg: 3
-      r_cut: 4.5
+      r_cut: 4.0
       d_cut: 4.0
     fit:
       loss:
