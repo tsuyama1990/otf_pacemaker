@@ -34,6 +34,7 @@ from src.utils.sssp_loader import (
     calculate_kpoints,
     validate_pseudopotentials
 )
+from src.utils.atomic_energies import AtomicEnergyManager
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -52,9 +53,67 @@ class SeedGenerator:
         self.output_dir = Path("data/seed")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _get_e0_dict(self):
+        """Retrieve or calculate isolated atomic energies."""
+        storage_path = self.output_dir / "potential.e0.yaml"
+        manager = AtomicEnergyManager(storage_path)
+
+        # Prepare DFT factory for single atoms
+        def dft_factory():
+             # Re-use DFT logic but for Gamma point
+             # Load SSSP
+             sssp_db = load_sssp_database(self.config.dft_params.sssp_json_path)
+             elements = self.config.md_params.elements
+             pseudo_dir_abs = str(Path(self.config.dft_params.pseudo_dir).resolve())
+             pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
+             ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
+
+             profile = EspressoProfile(
+                command=self.config.dft_params.command,
+                pseudo_dir=pseudo_dir_abs
+             )
+
+             qe_input_data = {
+                "control": {
+                    "pseudo_dir": pseudo_dir_abs,
+                    "calculation": "scf",
+                    "disk_io": "none",
+                },
+                "system": {
+                    "ecutwfc": ecutwfc,
+                    "ecutrho": ecutrho,
+                    "occupations": 'smearing',
+                    'smearing': 'mv',
+                    'degauss': 0.02,
+                },
+                "electrons": {
+                    "mixing_beta": 0.7,
+                }
+            }
+
+             return Espresso(
+                profile=profile,
+                pseudopotentials=pseudopotentials,
+                input_data=qe_input_data,
+                kpts=(1, 1, 1),
+                koffset=(1, 1, 1),
+                pseudo_dir=pseudo_dir_abs
+             )
+
+        return manager.get_e0(self.config.md_params.elements, dft_factory)
+
     def run(self):
         """Execute the seed generation pipeline."""
         logger.info("Starting Phase 1: Seed Generation")
+
+        # 0. Calculate E0 first
+        logger.info("Phase 1.0: E0 Calculation")
+        try:
+            e0_dict = self._get_e0_dict()
+            logger.info(f"Using E0: {e0_dict}")
+        except Exception as e:
+            logger.error(f"Failed to calculate E0: {e}")
+            raise e
 
         # 1. Candidate Generation
         logger.info("Phase 1.1: Candidate Generation")
@@ -73,14 +132,6 @@ class SeedGenerator:
         logger.info("Phase 1.1b: Scenario-Driven Generation")
         scenario_candidates: List[Atoms] = []
         gen_params = self.config.generation_params
-
-        # Inject config into ScenarioFactory if needed, or rely on scenarios dict
-        # Ideally ScenarioFactory should know about physics params but it's separate.
-        # If any scenario uses PreOptimizer internally (it does via InterfaceGenerator/etc),
-        # we need to make sure those are updated.
-        # However, scenario_generation package seems to use different generators than autostructure.
-        # Let's assume ScenarioFactory handles its own dependencies or we'd need to refactor it too.
-        # The prompt focused on 'src/autostructure/preopt.py'.
 
         for scenario_conf in gen_params.scenarios:
             try:
@@ -111,19 +162,9 @@ class SeedGenerator:
                 logger.error(f"Pre-optimization failed: {e}")
 
         # Combine candidates
-        # Note: Scenario candidates are considered high-value, so we might want to ensure they are kept.
-        # However, they should still pass some basic filtering or just be added directly.
-        # The prompt says: "Merge with Random Structures -> DirectSampler".
-
-        # 2b. Foundation Model Filtering (for random structures)
-        # We might skip this for scenario structures if they are already relaxed and trusted,
-        # but filtering for high energy is still good.
-        # However, if MACE filter uses the same model as optimizer, relaxed structures should pass.
-
         logger.info("Phase 1.2b: Foundation Model Filtering (MACE)")
         all_candidates = random_candidates + scenario_candidates
 
-        # Ideally, we filter all to remove unphysical ones, even from scenarios.
         mace_filter = MACEFilter(
             model_size="medium", 
             force_cutoff=20.0,
@@ -139,7 +180,6 @@ class SeedGenerator:
         # 3. DIRECT Sampling
         logger.info("Phase 1.3: DIRECT Sampling (ACE + BIRCH)")
         n_seed = 200
-        # Ensure we have enough structures to sample from
         if len(filtered_structures) < n_seed:
             logger.warning(f"Number of filtered structures ({len(filtered_structures)}) is less than n_seed ({n_seed}). Using all.")
             selected_structures = filtered_structures
@@ -147,7 +187,6 @@ class SeedGenerator:
             sampler = DirectSampler(n_clusters=n_seed)
             selected_structures = sampler.sample(filtered_structures)
 
-        # Save selected structures for reference
         from ase.io import write
         write(self.output_dir / "seed_structures.xyz", selected_structures)
 
@@ -158,30 +197,18 @@ class SeedGenerator:
         logger.info(f"Loading SSSP database from {self.config.dft_params.sssp_json_path}")
         sssp_db = load_sssp_database(self.config.dft_params.sssp_json_path)
         
-        # Get elements from structures
         elements = self.config.md_params.elements
-        
-        # Validate pseudopotentials exist
         pseudo_dir = Path(self.config.dft_params.pseudo_dir).resolve()
         validate_pseudopotentials(str(pseudo_dir), elements, sssp_db)
-        
-        # Get pseudopotential filenames from SSSP
         pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
-        
-        # Calculate cutoffs from SSSP (max across all elements)
         ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
         logger.info(f"Using SSSP cutoffs: ecutwfc={ecutwfc} Ry, ecutrho={ecutrho} Ry")
         
-        # Note: k-points will be calculated per-structure in the labeling loop
-        # since they depend on cell size
-        
-        # Correctly instantiate EspressoProfile for ASE 3.26.0
         profile = EspressoProfile(
             command=self.config.dft_params.command,
             pseudo_dir=str(pseudo_dir)
         )
 
-        # Create a template calculator (k-points will be set per structure)
         dft_calc_template = {
             'profile': profile,
             'pseudopotentials': pseudopotentials,
@@ -211,11 +238,10 @@ class SeedGenerator:
         lj_calc = ShiftedLennardJones(
             epsilon=self.config.lj_params.epsilon,
             sigma=self.config.lj_params.sigma,
-            rc=self.config.lj_params.cutoff
+            rc=self.config.lj_params.cutoff,
+            shift_energy=self.config.lj_params.shift_energy
         )
 
-        # Create initial DFT calculator (will be updated per-structure in the loop)
-        # Use a conservative default k-grid for initialization
         initial_kpts = (3, 3, 3)
         dft_calc = Espresso(
             kpts=initial_kpts,
@@ -223,27 +249,28 @@ class SeedGenerator:
             **dft_calc_template
         )
 
-        labeler = DeltaLabeler(reference_calculator=dft_calc, baseline_calculator=lj_calc)
+        labeler = DeltaLabeler(
+            reference_calculator=dft_calc,
+            baseline_calculator=lj_calc,
+            e0_dict=e0_dict
+        )
 
         labeled_structures = []
         for i, atoms in enumerate(selected_structures):
             logger.info(f"Labeling structure {i+1}/{len(selected_structures)}")
             
-            # Calculate k-points based on this structure's cell size
             kpts, kpts_shift = calculate_kpoints(
                 atoms.cell,
                 kpoint_density=self.config.dft_params.kpoint_density
             )
             logger.info(f"Structure {i+1}: k-points={kpts}, shift={kpts_shift}")
             
-            # Create calculator with structure-specific k-points
             dft_calc = Espresso(
                 kpts=kpts,
                 koffset=kpts_shift,
                 **dft_calc_template
             )
             
-            # Update labeler's reference calculator
             labeler.reference_calculator = dft_calc
             
             labeled = labeler.label(atoms)
@@ -263,7 +290,6 @@ class SeedGenerator:
         shutil.move(dataset_path, final_dataset_path)
 
         try:
-            # We assume initial_potential=None means train from scratch
             potential_path = trainer.train(str(final_dataset_path), initial_potential=None)
             final_potential_path = self.output_dir / "seed_potential.yace"
             shutil.move(potential_path, final_potential_path)

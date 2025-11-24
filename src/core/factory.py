@@ -25,6 +25,7 @@ from src.utils.sssp_loader import (
     get_pseudopotentials_dict,
     validate_pseudopotentials
 )
+from src.utils.atomic_energies import AtomicEnergyManager
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,81 @@ class ComponentFactory:
             input_generator=input_generator
         )
 
+    def _create_dft_calculator(self, kpts=None):
+        """Helper to create DFT calculator with consistent settings."""
+        logger.info(f"Loading SSSP database from {self.config.dft_params.sssp_json_path}")
+        sssp_db = load_sssp_database(self.config.dft_params.sssp_json_path)
+
+        elements = self.config.md_params.elements
+        pseudo_dir_abs = str(Path(self.config.dft_params.pseudo_dir).resolve())
+
+        validate_pseudopotentials(pseudo_dir_abs, elements, sssp_db)
+
+        pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
+        ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
+        logger.info(f"Using SSSP cutoffs: ecutwfc={ecutwfc} Ry, ecutrho={ecutrho} Ry")
+
+        if kpts is None:
+             kpts = (3, 3, 3) # Default for clusters
+
+        qe_input_data = {
+            "control": {
+                "pseudo_dir": pseudo_dir_abs,
+                "calculation": "scf",
+                "disk_io": "none",
+            },
+            "system": {
+                "ecutwfc": ecutwfc,
+                "ecutrho": ecutrho,
+            },
+            "electrons": {}
+        }
+
+        profile = EspressoProfile(
+            command=self.config.dft_params.command,
+            pseudo_dir=pseudo_dir_abs
+        )
+
+        qe_calculator = Espresso(
+            profile=profile,
+            pseudopotentials=pseudopotentials,
+            input_data=qe_input_data,
+            kpts=kpts,
+            koffset=(1, 1, 1),
+            pseudo_dir=pseudo_dir_abs
+        )
+        return qe_calculator
+
+    def _get_e0_dict(self):
+        """Retrieve E0 using AtomicEnergyManager."""
+        storage_path = Path("data/seed/potential.e0.yaml") # Convention or Config?
+        if self.config.al_params.initial_potential:
+             # If using existing potential, E0 might be near it?
+             # But usually we define a standard place.
+             # Or we look for .e0.yaml near potential.yaml_path
+             pot_path = Path(self.config.al_params.potential_yaml_path)
+             if pot_path.parent.exists():
+                 storage_path = pot_path.parent / "potential.e0.yaml"
+
+        manager = AtomicEnergyManager(storage_path)
+
+        # Factory for isolated atom calculation
+        def dft_factory():
+             # Gamma point only for isolated atom
+             return self._create_dft_calculator(kpts=(1,1,1))
+
+        return manager.get_e0(self.config.md_params.elements, dft_factory)
+
     def create_kmc_engine(self) -> KMCEngine:
         """Creates the KMC Engine."""
+        # We need E0 for KMC SumCalculator
+        e0_dict = self._get_e0_dict()
+
         return OffLatticeKMCEngine(
             kmc_params=self.config.kmc_params,
-            al_params=self.config.al_params
+            al_params=self.config.al_params,
+            lj_params=self.config.lj_params,
+            e0_dict=e0_dict
         )
 
     def create_sampler(self) -> Sampler:
@@ -96,46 +167,7 @@ class ComponentFactory:
     def create_labeler(self) -> Labeler:
         """Creates the Labeler (Delta-Learning: DFT - LJ)."""
         # 1. Setup DFT (Espresso)
-        logger.info(f"Loading SSSP database from {self.config.dft_params.sssp_json_path}")
-        sssp_db = load_sssp_database(self.config.dft_params.sssp_json_path)
-
-        elements = self.config.md_params.elements
-        pseudo_dir_abs = str(Path(self.config.dft_params.pseudo_dir).resolve())
-
-        validate_pseudopotentials(pseudo_dir_abs, elements, sssp_db)
-
-        pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
-        ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
-        logger.info(f"Using SSSP cutoffs: ecutwfc={ecutwfc} Ry, ecutrho={ecutrho} Ry")
-
-        default_kpts = (3, 3, 3)
-
-        qe_input_data = {
-            "control": {
-                "pseudo_dir": pseudo_dir_abs,
-                "calculation": "scf",
-                "disk_io": "none",
-            },
-            "system": {
-                "ecutwfc": ecutwfc,
-                "ecutrho": ecutrho,
-            },
-            "electrons": {}
-        }
-
-        profile = EspressoProfile(
-            command=self.config.dft_params.command,
-            pseudo_dir=pseudo_dir_abs
-        )
-
-        qe_calculator = Espresso(
-            profile=profile,
-            pseudopotentials=pseudopotentials,
-            input_data=qe_input_data,
-            kpts=default_kpts,
-            koffset=(1, 1, 1),
-            pseudo_dir=pseudo_dir_abs
-        )
+        qe_calculator = self._create_dft_calculator()
 
         # 2. Setup Baseline (LJ)
         lj_kwargs = {
@@ -146,9 +178,13 @@ class ComponentFactory:
         }
         lj_calculator = ShiftedLennardJones(**lj_kwargs)
 
+        # 3. Get E0
+        e0_dict = self._get_e0_dict()
+
         return DeltaLabeler(
             reference_calculator=qe_calculator,
-            baseline_calculator=lj_calculator
+            baseline_calculator=lj_calculator,
+            e0_dict=e0_dict
         )
 
     def create_trainer(self) -> Trainer:
