@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Dict, List, Set, Optional
+from typing import Dict, Set, Optional
 from ase import Atoms
 from ase.calculators.calculator import Calculator
 from ase.calculators.emt import EMT
@@ -34,7 +34,11 @@ class PreOptimizer:
             steps (int): Maximum number of relaxation steps.
             mic_distance (float): Minimum interatomic distance threshold (Å) for discarding.
         """
-        self.lj_params = lj_params
+        # Flatten parameters to ensure no hardcoding and explicit usage
+        self.lj_epsilon = lj_params['epsilon']
+        self.lj_sigma = lj_params['sigma']
+        self.lj_cutoff = lj_params['cutoff']
+
         self.fmax = fmax
         self.steps = steps
         self.mic_distance = mic_distance
@@ -54,11 +58,11 @@ class PreOptimizer:
         if unique_elements.issubset(self.emt_elements):
             return EMT()
         else:
-            # Use injected LJ parameters
+            # Use injected parameters
             return LennardJones(
-                epsilon=self.lj_params['epsilon'],
-                sigma=self.lj_params['sigma'],
-                rc=self.lj_params['cutoff']
+                epsilon=self.lj_epsilon,
+                sigma=self.lj_sigma,
+                rc=self.lj_cutoff
             )
 
     def run_pre_optimization(self, atoms: Atoms) -> Atoms:

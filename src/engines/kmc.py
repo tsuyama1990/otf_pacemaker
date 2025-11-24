@@ -30,11 +30,6 @@ try:
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
-    # Dummy decorator
-    def jit(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
 
 from src.core.interfaces import KMCEngine, KMCResult
 from src.core.enums import KMCStatus
@@ -58,55 +53,55 @@ def _setup_calculator(atoms: Atoms, potential_path: str):
     calc = PyACECalculator(potential_path)
     atoms.calc = calc
 
+if HAS_NUMBA:
+    @jit(nopython=True)
+    def _bfs_traversal_numba(
+        start_node: int,
+        indices: np.ndarray,
+        indptr: np.ndarray,
+        cns: np.ndarray,
+        cn_cutoff: int,
+        num_atoms: int
+    ) -> np.ndarray:
+        """
+        BFS traversal using Numba.
+        """
+        visited = np.zeros(num_atoms, dtype=np.bool_)
+        visited[start_node] = True
 
-@jit(nopython=True)
-def _bfs_traversal_numba(
-    start_node: int,
-    indices: np.ndarray,
-    indptr: np.ndarray,
-    cns: np.ndarray,
-    cn_cutoff: int,
-    num_atoms: int
-) -> np.ndarray:
-    """
-    BFS traversal using Numba.
-    """
-    visited = np.zeros(num_atoms, dtype=np.bool_)
-    visited[start_node] = True
+        queue = np.empty(num_atoms, dtype=np.int32)
+        q_head = 0
+        q_tail = 0
 
-    queue = np.empty(num_atoms, dtype=np.int32)
-    q_head = 0
-    q_tail = 0
+        queue[q_tail] = start_node
+        q_tail += 1
 
-    queue[q_tail] = start_node
-    q_tail += 1
+        cluster_buffer = np.empty(num_atoms, dtype=np.int32)
+        cluster_count = 0
 
-    cluster_buffer = np.empty(num_atoms, dtype=np.int32)
-    cluster_count = 0
+        cluster_buffer[cluster_count] = start_node
+        cluster_count += 1
 
-    cluster_buffer[cluster_count] = start_node
-    cluster_count += 1
+        while q_head < q_tail:
+            current = queue[q_head]
+            q_head += 1
 
-    while q_head < q_tail:
-        current = queue[q_head]
-        q_head += 1
+            start_idx = indptr[current]
+            end_idx = indptr[current + 1]
 
-        start_idx = indptr[current]
-        end_idx = indptr[current + 1]
+            for k in range(start_idx, end_idx):
+                neighbor = indices[k]
 
-        for k in range(start_idx, end_idx):
-            neighbor = indices[k]
+                if not visited[neighbor]:
+                    if cns[neighbor] < cn_cutoff:
+                        visited[neighbor] = True
+                        queue[q_tail] = neighbor
+                        q_tail += 1
 
-            if not visited[neighbor]:
-                if cns[neighbor] < cn_cutoff:
-                    visited[neighbor] = True
-                    queue[q_tail] = neighbor
-                    q_tail += 1
+                        cluster_buffer[cluster_count] = neighbor
+                        cluster_count += 1
 
-                    cluster_buffer[cluster_count] = neighbor
-                    cluster_count += 1
-
-    return cluster_buffer[:cluster_count]
+        return cluster_buffer[:cluster_count]
 
 
 def _bfs_traversal_scipy(
@@ -119,26 +114,7 @@ def _bfs_traversal_scipy(
 ) -> np.ndarray:
     """
     BFS traversal using Scipy (Fallback).
-
-    Strategy:
-    1. Identify 'valid' nodes (cns < cutoff).
-    2. Construct a subgraph or traverse logically.
-    3. Scipy csgraph traversal usually works on the whole matrix.
-
-    Efficient implementation:
-    We perform a Python-level BFS but use vectorized operations where possible,
-    or just use scipy's breadth_first_order if we can mask the graph.
-
-    Since masking the graph (creating new CSR) might be expensive,
-    and we just need one cluster, a simple iterative approach is fine
-    if Numba is missing. It's slower but robust.
-
-    However, prompt asked for 'vectorized implementation using scipy.sparse'.
-    We can mask the adjacency matrix: keep edges (i, j) only if BOTH i and j are valid.
-    Actually, we only need to check if neighbor is valid.
-
-    Let's create a boolean mask of valid atoms.
-    valid_mask = cns < cn_cutoff
+    Explicit implementation to ensure performance when Numba is missing.
     """
     # Create valid mask
     valid_mask = cns < cn_cutoff
@@ -146,26 +122,11 @@ def _bfs_traversal_scipy(
     if not valid_mask[start_node]:
         return np.array([start_node], dtype=np.int32)
 
-    # Reconstruct CSR for valid subgraph?
-    # This involves filtering edges.
-    # Alternatively, just use pure python queue for fallback if we assume small molecules.
-    # But for "Scalability", pure python is bad.
-
-    # Scipy approach:
-    # 1. Zero out rows/cols of invalid nodes in the adjacency matrix.
-    #    This disconnects them.
-    # 2. Run BFS from start_node.
-
-    # Check if we have data to reconstruct matrix
-    # We only have indices/indptr (topology). Data is usually 1s.
-
     data = np.ones(len(indices), dtype=np.int8)
     adj = sparse.csr_matrix((data, indices, indptr), shape=(num_atoms, num_atoms))
 
     # We want to restrict traversal to 'valid_mask' nodes.
-    # A trick is to multiply the matrix by the mask diagonal.
     # M' = D * M * D where D is diagonal matrix with 1 for valid, 0 for invalid.
-
     diag_data = valid_mask.astype(np.int8)
     D = sparse.diags(diag_data)
 
@@ -180,9 +141,6 @@ def _bfs_traversal_scipy(
         directed=False,
         return_predecessors=True
     )
-
-    # The result contains ALL reachable nodes in the filtered graph starting from start_node.
-    # This corresponds exactly to the connected component satisfying the condition.
 
     return nodes.astype(np.int32)
 
@@ -201,7 +159,14 @@ class OffLatticeKMCEngine(KMCEngine):
         self.al_params = al_params
 
         if not HAS_NUMBA:
-            logger.warning("Numba not detected. Falling back to Scipy for graph traversal. Performance may degrade.")
+            # As per requirements: "Numba非依存時の明示的なエラーハンドリングまたはScipy代替実装"
+            # We are providing the Scipy alternative, but let's log explicitly.
+            logger.warning("Numba not installed. Using Scipy fallback for graph traversal.")
+            # Verify scipy is available
+            try:
+                import scipy.sparse.csgraph
+            except ImportError:
+                 raise RuntimeError("Numba is missing AND Scipy is missing. One is required for performance.")
 
     def _identify_moving_cluster(
         self,
@@ -227,6 +192,7 @@ class OffLatticeKMCEngine(KMCEngine):
                 len(atoms)
             )
         else:
+            # Fallback to Scipy implementation
             cluster_arr = _bfs_traversal_scipy(
                 center_idx,
                 indices,

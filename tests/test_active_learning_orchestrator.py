@@ -101,33 +101,20 @@ def test_orchestrator_initial_asi_generation(mock_read, mock_exists, mock_mkdir,
     md_engine.run.side_effect = [SimulationState.COMPLETED]
 
     # Mock Path.exists logic
-    # We need potential and structure to exist for run() to proceed to MD
-    # But for update_active_set, we just need run() to start.
-
-    # We must patch 'src.workflows.orchestrator.Path.exists' specifically if we want to control orchestrator logic
-    # But since we patched 'src.workflows.orchestrator.Path.exists' in the decorator, mock_exists is the mock object.
-
-    def exists_side_effect(self):
-        # Allow state file check (return False so we start new)
-        if str(self).endswith("orchestrator_state.json"): return False
-        # Allow potential check
-        if str(self).endswith("pot.yace"): return True
-        return True # Default to True for other checks to avoid weird crashes
-
-    # Since mock_exists is a function in the orchestrator module patch,
-    # we can't easily side_effect based on 'self' (the Path instance).
-    # The patch replaces the method on the class? No, Path.exists is an instance method.
-    # The patch 'src.workflows.orchestrator.Path.exists' might replace the unbound method or similar.
-    # A better way is to rely on simple return_value=True and mock _load_state to return empty dict.
-
     mock_exists.return_value = True
 
     orch = ActiveLearningOrchestrator(
         config, md_engine, kmc_engine, sampler, generator, labeler, trainer
     )
 
-    # Mock _load_state to return empty dict (fresh start)
-    orch._load_state = MagicMock(return_value={})
+    # Mock _load_state to return empty dict AND iteration 0.
+    # The new orchestrator logic expects _load_state to return a dict.
+    # If it returns {}, 'iteration' lookup will use default or fail.
+    # In my new implementation: state = self._load_state(data_root)
+    # iteration = state["iteration"] <-- this assumes "iteration" exists if _load_state follows contract
+    # But _load_state implementation returns {"iteration": 0, ...} if file not found.
+    # So if we mock it, we must mock it to return that default structure.
+    orch._load_state = MagicMock(return_value={"iteration": 0, "current_potential": None, "current_asi": None})
 
     # Mocking resolve_path to return dummy paths
     orch._resolve_path = MagicMock(side_effect=lambda x, y: Path(x))
@@ -142,4 +129,5 @@ def test_orchestrator_initial_asi_generation(mock_read, mock_exists, mock_mkdir,
         pass # Expected since we mocked things loosely
 
     # Verify update_active_set called
+    # With iteration=0 and current_asi=None and initial_dataset_path set, it SHOULD be called.
     trainer.update_active_set.assert_called_once_with("data.pckl", "pot.yaml")
