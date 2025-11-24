@@ -11,11 +11,12 @@ from ase import Atoms
 
 from src.core.interfaces import Trainer
 from src.core.config import TrainingParams
+from src.utils.hardware import get_available_vram, suggest_batch_size
 
 logger = logging.getLogger(__name__)
 
 class PacemakerTrainer(Trainer):
-    """Manages the training process for ACE potentials with Experience Replay."""
+    """Manages the training process for ACE potentials with Experience Replay, Ladder Strategy, and GPU opt."""
 
     def __init__(self, training_params: TrainingParams):
         """Initialize PacemakerTrainer.
@@ -52,21 +53,16 @@ class PacemakerTrainer(Trainer):
 
         # 1. Load New Data
         new_df = pd.read_pickle(new_data_path)
-        if hasattr(new_df, "ase_atoms"):
-             # Standardize column name if needed, though prepare_dataset sets it to ase_atoms
-             pass
 
         # 2. Update Global Dataset
         if global_path.exists():
             try:
                 global_df = pd.read_pickle(global_path)
-                # Append
                 combined_global = pd.concat([global_df, new_df], ignore_index=True)
             except Exception as e:
                 logger.error(f"Failed to load global dataset: {e}. Starting fresh.")
                 combined_global = new_df
         else:
-            # Ensure parent directory exists
             global_path.parent.mkdir(parents=True, exist_ok=True)
             combined_global = new_df
 
@@ -75,29 +71,18 @@ class PacemakerTrainer(Trainer):
         logger.info(f"Global dataset updated: {len(combined_global)} structures stored at {global_path}")
 
         # 3. Experience Replay Sampling
-        # Strategy: Use 100% of new data + (ratio * len(new)) of OLD data.
-
-        # Identify old data (Global - New)
-        # Since we just concatenated, the last len(new_df) are new.
-        # But to be robust against duplicates or re-runs, let's treat 'combined_global' as the source
-        # and we explicitly want to include 'new_df'.
-
         n_new = len(new_df)
         n_global = len(combined_global)
         n_old = n_global - n_new
-
         ratio = self.params.replay_ratio
 
         if n_old > 0 and ratio > 0:
             n_replay = int(n_new * ratio)
-            n_replay = min(n_replay, n_old) # Can't sample more than we have
+            n_replay = min(n_replay, n_old)
 
             if n_replay > 0:
-                # Old data is approximately the first n_old indices if we just appended
-                # This is a safe assumption for simple appending.
                 old_df = combined_global.iloc[:n_old]
                 sampled_old = old_df.sample(n=n_replay)
-
                 final_training_df = pd.concat([new_df, sampled_old], ignore_index=True)
                 logger.info(f"Experience Replay: Mixed {n_new} new + {n_replay} old structures.")
             else:
@@ -122,11 +107,6 @@ class PacemakerTrainer(Trainer):
         """
         output_asi = "potential.asi"
 
-        # Ensure we are using the robust mixed dataset for active set selection if possible,
-        # but the interface receives 'dataset_path'.
-        # Usually, Orchestrator calls prepare_dataset -> returns path -> calls update_active_set -> calls train.
-        # We will assume dataset_path is the one to use.
-
         cmd = [
             "pace_activeset",
             "-d", dataset_path,
@@ -146,8 +126,70 @@ class PacemakerTrainer(Trainer):
 
         return str(Path(output_asi).resolve())
 
+    def prune_active_set(self, active_set_path: str, threshold: float = 0.99) -> None:
+        """Prune the active set to remove redundant structures.
+
+        Uses pace_activeset --prune logic (if available, otherwise we might need custom logic).
+        Prompt says: "Use pace_activeset's pruning function".
+        Assuming usage: pace_activeset -a potential.asi --prune threshold
+
+        Args:
+            active_set_path: Path to the .asi file.
+            threshold: Similarity threshold (default 0.99).
+        """
+        if not Path(active_set_path).exists():
+            logger.warning(f"Active set {active_set_path} not found. Skipping prune.")
+            return
+
+        cmd = [
+            "pace_activeset",
+            "-a", active_set_path,
+            "--prune", str(threshold),
+            "--overwrite" # Assuming we want to update in place
+        ]
+
+        logger.info(f"Pruning Active Set: {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            logger.info("Active Set pruning completed.")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"pace_activeset pruning failed: {e.stderr}")
+            # Non-critical failure
+
+    def _get_dynamic_config(self, iteration: int) -> Dict[str, Any]:
+        """Generate dynamic configuration based on iteration and hardware.
+
+        Args:
+            iteration: Current training iteration (0-indexed).
+
+        Returns:
+            dict: Configuration parameters for potential and backend.
+        """
+        config = {}
+
+        # 1. Ladder Logic
+        if self.params.ladder_strategy:
+            step = iteration // self.params.ladder_interval
+            new_max_deg = self.params.initial_max_deg + step
+            if new_max_deg > self.params.final_max_deg:
+                new_max_deg = self.params.final_max_deg
+
+            logger.info(f"Ladder Strategy: Iteration {iteration}, max_deg set to {new_max_deg}")
+            config["max_deg"] = new_max_deg
+        else:
+            config["max_deg"] = self.params.initial_max_deg
+
+        # 2. GPU Logic
+        vram = get_available_vram()
+        batch_size = suggest_batch_size(vram)
+        logger.info(f"GPU Logic: VRAM={vram} bytes, Batch Size={batch_size}")
+        config["batch_size"] = batch_size
+
+        return config
+
     def train(self, dataset_path: str, initial_potential: Optional[str] = None,
-              potential_yaml_path: Optional[str] = None, asi_path: Optional[str] = None) -> str:
+              potential_yaml_path: Optional[str] = None, asi_path: Optional[str] = None,
+              iteration: int = 0) -> str:
         """Train the potential using Pacemaker.
 
         Args:
@@ -155,21 +197,19 @@ class PacemakerTrainer(Trainer):
             initial_potential: Path to the initial potential file to start from.
             potential_yaml_path: Path to potential.yaml.
             asi_path: Path to the current Active Set Index file.
+            iteration: Current AL iteration count.
 
         Returns:
             str: The path to the newly trained potential file.
         """
 
         # 1. Experience Replay Mixing
-        # The input 'dataset_path' typically comes from 'prepare_dataset' which contains only new structures.
-        # We now mix it with global history.
         mixed_dataset_path = self._update_and_sample_dataset(dataset_path)
 
         # 2. Update Active Set
         current_asi = asi_path
         if potential_yaml_path:
              try:
-                 # We use the mixed dataset to select the active set to ensure coverage
                  current_asi = self.update_active_set(mixed_dataset_path, potential_yaml_path)
                  logger.info(f"Active Set updated: {current_asi}")
              except Exception as e:
@@ -188,6 +228,8 @@ class PacemakerTrainer(Trainer):
                 logger.warning(f"Could not read elements from dataset: {e}")
 
         # 3. Dynamic Config Generation
+        dynamic_settings = self._get_dynamic_config(iteration)
+
         config = {
             "cutoff": self.params.ace_cutoff,
             "data": {
@@ -208,6 +250,7 @@ class PacemakerTrainer(Trainer):
             },
             "backend": {
                 "evaluator": "tensorpot",
+                "batch_size": dynamic_settings.get("batch_size", 32)
             }
         }
 
@@ -220,7 +263,7 @@ class PacemakerTrainer(Trainer):
             config["potential"]["elements"] = elements
             config["potential"]["bonds"] = {
                 "N": 3,
-                "max_deg": 10,
+                "max_deg": dynamic_settings.get("max_deg", 6),
                 "r0": 1.5,
                 "rad_base": "Chebyshev",
                 "rad_parameters": [self.params.ace_cutoff],

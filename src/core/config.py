@@ -17,12 +17,6 @@ logger = logging.getLogger(__name__)
 def generate_default_lj_params(elements: List[str]) -> Dict[str, float]:
     """
     Generates robust default Lennard-Jones parameters based on element physics.
-
-    Physics:
-        - Sigma: Derived from the sum of covalent radii to place the repulsive wall correctly.
-                 sigma = (2 * r_avg) * 2^(-1/6)
-        - Epsilon: Defaults to 1.0 eV (Strong Repulsion) to ensure MD stability.
-        - Cutoff: Defaults to 2.5 * sigma.
     """
     if not elements:
         return {"epsilon": 1.0, "sigma": 2.0, "cutoff": 5.0}
@@ -121,7 +115,7 @@ class LJParams:
     epsilon: float
     sigma: float
     cutoff: float
-    shift_energy: bool = True  # Enforce V(rc) = 0 logic synchronization
+    shift_energy: bool = True
 
 
 @dataclass
@@ -154,6 +148,12 @@ class TrainingParams:
     energy_weight: float = 100.0
     force_weight: float = 1.0
 
+    # Ladder Strategy
+    ladder_strategy: bool = False
+    initial_max_deg: int = 6
+    final_max_deg: int = 12
+    ladder_interval: int = 5
+
 
 @dataclass
 class Config:
@@ -180,12 +180,10 @@ class Config:
 
         md_dict = config_dict.get("md_params", {})
 
-        # --- AUTOMATED LJ LOGIC ---
         lj_dict = config_dict.get("lj_params", {})
         if not lj_dict:
             elements = md_dict.get("elements", [])
             lj_dict = generate_default_lj_params(elements)
-        # --------------------------
 
         dft_dict = config_dict.get("dft_params", {}).copy()
         allowed_dft_keys = {"sssp_json_path", "pseudo_dir", "command", "kpoint_density"}
@@ -215,7 +213,6 @@ class Config:
 
         constant_path = path.parent / "constant.yaml"
         if constant_path.exists():
-            logger.info(f"Loading constants from {constant_path}")
             with constant_path.open("r", encoding="utf-8") as f:
                 constant_dict = yaml.safe_load(f) or {}
 
