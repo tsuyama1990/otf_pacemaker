@@ -12,12 +12,14 @@ from ase.calculators.lj import LennardJones
 from src.core.config import Config
 from src.core.interfaces import MDEngine, KMCEngine, Sampler, StructureGenerator, Labeler, Trainer
 from src.sampling.strategies.max_gamma import MaxGammaSampler
+from src.sampling.strategies.composite import CompositeSampler
 from src.scenario_generation.strategies.small_cell import SmallCellGenerator
 from src.labeling.strategies.delta_labeler import DeltaLabeler
 from src.labeling.calculators.shifted_lj import ShiftedLennardJones
 from src.engines.lammps.runner import LAMMPSRunner
 from src.engines.lammps.input_generator import LAMMPSInputGenerator
 from src.engines.kmc import OffLatticeKMCEngine
+from src.engines.dft.configurator import DFTConfigurator
 from src.training.strategies.pacemaker import PacemakerTrainer
 from src.utils.sssp_loader import (
     load_sssp_database,
@@ -64,49 +66,26 @@ class ComponentFactory:
         )
 
     def _create_dft_calculator(self, kpts=None):
-        """Helper to create DFT calculator with consistent settings."""
-        logger.info(f"Loading SSSP database from {self.config.dft_params.sssp_json_path}")
-        sssp_db = load_sssp_database(self.config.dft_params.sssp_json_path)
-
+        """Helper to create DFT calculator with consistent settings using Configurator."""
         elements = self.config.md_params.elements
-        pseudo_dir_abs = str(Path(self.config.dft_params.pseudo_dir).resolve())
 
-        validate_pseudopotentials(pseudo_dir_abs, elements, sssp_db)
+        # We need a dummy atoms object for heuristics if we are creating a generic calculator.
+        # However, the configurator's build() method asks for atoms.
+        # The Labeler needs a calculator *instance* passed to it.
+        # But if the calculator settings depend on the atoms (e.g. Heuristics),
+        # we ideally need to re-configure per atoms in the Labeler.
+        # BUT, `Espresso` calculator in ASE is stateful.
+        # If we just return a pre-configured calculator here, it might not have the correct magnetism
+        # for a specific structure if the heuristics depend on that structure's composition (which is constant in a run usually).
+        # Assuming composition is constant (defined in md_params.elements), Heuristics based on element types are safe.
+        # Heuristics based on structure (e.g. geometry) are not used yet (only composition).
 
-        pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
-        ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
-        logger.info(f"Using SSSP cutoffs: ecutwfc={ecutwfc} Ry, ecutrho={ecutrho} Ry")
+        # We create a dummy atoms object with all elements to let heuristics run once.
+        from ase import Atoms
+        dummy_atoms = Atoms(symbols=elements)
 
-        if kpts is None:
-             kpts = (3, 3, 3) # Default for clusters
-
-        qe_input_data = {
-            "control": {
-                "pseudo_dir": pseudo_dir_abs,
-                "calculation": "scf",
-                "disk_io": "none",
-            },
-            "system": {
-                "ecutwfc": ecutwfc,
-                "ecutrho": ecutrho,
-            },
-            "electrons": {}
-        }
-
-        profile = EspressoProfile(
-            command=self.config.dft_params.command,
-            pseudo_dir=pseudo_dir_abs
-        )
-
-        qe_calculator = Espresso(
-            profile=profile,
-            pseudopotentials=pseudopotentials,
-            input_data=qe_input_data,
-            kpts=kpts,
-            koffset=(1, 1, 1),
-            pseudo_dir=pseudo_dir_abs
-        )
-        return qe_calculator
+        configurator = DFTConfigurator(self.config.dft_params)
+        return configurator.build(dummy_atoms, elements, kpts)
 
     def _get_e0_dict(self):
         """Retrieve E0 using AtomicEnergyManager."""
@@ -142,7 +121,13 @@ class ComponentFactory:
 
     def create_sampler(self) -> Sampler:
         """Creates the Active Learning Sampler."""
-        return MaxGammaSampler()
+        if self.config.al_params.sampling_strategy == "composite":
+            return CompositeSampler()
+        elif self.config.al_params.sampling_strategy == "max_gamma":
+            return MaxGammaSampler()
+        else:
+             # Default fallback
+             return CompositeSampler()
 
     def create_generator(self) -> StructureGenerator:
         """Creates the Structure Generator for AL."""
@@ -184,7 +169,8 @@ class ComponentFactory:
         return DeltaLabeler(
             reference_calculator=qe_calculator,
             baseline_calculator=lj_calculator,
-            e0_dict=e0_dict
+            e0_dict=e0_dict,
+            outlier_energy_max=self.config.al_params.outlier_energy_max
         )
 
     def create_trainer(self) -> Trainer:
