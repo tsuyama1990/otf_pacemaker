@@ -20,6 +20,7 @@ from src.core.interfaces import MDEngine, KMCEngine, Sampler, StructureGenerator
 from src.core.enums import SimulationState, KMCStatus
 from src.core.config import Config
 from src.utils.logger import CSVLogger
+from src.validation.pacemaker_validator import PacemakerValidator
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,9 @@ class ActiveLearningOrchestrator:
         self.csv_logger = csv_logger or CSVLogger()
         self.max_workers = config.al_params.num_parallel_labeling
 
+        # Initialize Validator
+        self.validator = PacemakerValidator()
+
     def _save_state(self, base_dir: Path, state: Dict[str, Any]):
         """Save the current orchestrator state to a JSON file."""
         state_file = base_dir / "orchestrator_state.json"
@@ -109,7 +113,8 @@ class ActiveLearningOrchestrator:
                     potential_path: Path,
                     potential_yaml_path: Path,
                     asi_path: Optional[Path],
-                    work_dir: Path) -> Optional[str]:
+                    work_dir: Path,
+                    iteration: int) -> Optional[str]:
         """Trigger Active Learning pipeline for given structures."""
         logger.info(f"Triggering AL for {len(uncertain_structures)} uncertain structures.")
 
@@ -119,14 +124,16 @@ class ActiveLearningOrchestrator:
             write(temp_dump, atoms, format="lammps-dump-text")
 
             sample_kwargs = {
-                "atoms": atoms,
+                "structures": [atoms], # MaxVolSampler now expects 'structures' list
+                "potential_path": str(potential_path), # MaxVolSampler needs path for ACESampler
                 "n_clusters": self.config.al_params.n_clusters,
-                "dump_file": str(temp_dump),
-                "potential_yaml_path": str(potential_yaml_path),
-                "asi_path": str(asi_path) if asi_path else None,
+                "dump_file": str(temp_dump), # Legacy kwarg if needed
+                "potential_yaml_path": str(potential_yaml_path), # Legacy
+                "asi_path": str(asi_path) if asi_path else None, # Legacy
                 "elements": self.config.md_params.elements
             }
 
+            # Sampler returns (Atoms, center_id)
             selected_samples = self.sampler.sample(**sample_kwargs)
 
             for s_atoms, center_id in selected_samples:
@@ -150,12 +157,32 @@ class ActiveLearningOrchestrator:
         logger.info("Training new potential (Fine-Tuning)...")
         dataset_path = self.trainer.prepare_dataset(labeled_clusters)
 
+        # 1. Active Set Pruning (every 10 iterations)
+        if asi_path and iteration % 10 == 0:
+             if hasattr(self.trainer, "prune_active_set"):
+                 self.trainer.prune_active_set(str(asi_path), threshold=0.99)
+
+        # 2. Training
+        # We pass the current iteration for dynamic config
         new_potential = self.trainer.train(
             dataset_path=dataset_path,
             initial_potential=str(potential_path),
             potential_yaml_path=str(potential_yaml_path),
-            asi_path=str(asi_path) if asi_path else None
+            asi_path=str(asi_path) if asi_path else None,
+            iteration=iteration
         )
+
+        # 3. Validation
+        logger.info("Validating new potential...")
+        validation_results = self.validator.validate(new_potential)
+
+        if validation_results.get("status") == "FAILED":
+             logger.warning(f"Validation FAILED: {validation_results.get('error')}")
+             # Strategy: Accept it but log warning? Or discard?
+             # For now, log warning and proceed, as strict rejection might halt progress.
+             # Alternatively, we could revert to old potential if severe.
+        else:
+             logger.info(f"Validation Passed: {validation_results}")
 
         return new_potential
 
@@ -165,28 +192,22 @@ class ActiveLearningOrchestrator:
         data_root = Path("data")
         data_root.mkdir(parents=True, exist_ok=True)
 
-        # --- State Initialization ---
         state = self._load_state(data_root)
         iteration = state["iteration"]
 
-        # Restore potential or use initial
         current_potential = state.get("current_potential") or self.config.al_params.initial_potential
         current_asi = state.get("current_asi") or self.config.al_params.initial_active_set_path
-
-        # Restore other state variables
         current_structure = state.get("current_structure") or self.config.md_params.initial_structure
         is_restart = state.get("is_restart", False)
         al_consecutive_counter = state.get("al_consecutive_counter", 0)
 
         original_cwd = Path.cwd()
 
-        # Resolve paths that don't change
         potential_yaml_path = self._resolve_path(self.config.al_params.potential_yaml_path, original_cwd)
         initial_dataset_path = None
         if self.config.al_params.initial_dataset_path:
              initial_dataset_path = self._resolve_path(self.config.al_params.initial_dataset_path, original_cwd)
 
-        # 0. Initialize Active Set if needed (First Run)
         if not current_asi and initial_dataset_path and iteration == 0:
              logger.info("No initial Active Set provided. Generating from initial dataset...")
              try:
@@ -197,7 +218,6 @@ class ActiveLearningOrchestrator:
                  current_asi = self.trainer.update_active_set(str(initial_dataset_path), str(potential_yaml_path))
                  logger.info(f"Initial Active Set generated: {current_asi}")
 
-                 # Update state locally, will be saved in loop
                  state["current_asi"] = current_asi
                  os.chdir(original_cwd)
              except Exception as e:
@@ -208,7 +228,6 @@ class ActiveLearningOrchestrator:
         while True:
             iteration += 1
 
-            # Atomic state update
             state["iteration"] = iteration
             state["current_potential"] = current_potential
             state["current_structure"] = current_structure
@@ -236,7 +255,6 @@ class ActiveLearningOrchestrator:
                     logger.error(f"Potential file not found: {abs_potential_path}")
                     break
 
-                # --- 1. MD Phase ---
                 input_structure_arg = self._prepare_structure_path(
                     is_restart, iteration, current_structure, original_cwd
                 )
@@ -254,11 +272,9 @@ class ActiveLearningOrchestrator:
                 logger.info(f"MD Finished with state: {sim_state}")
 
                 if sim_state == SimulationState.UNCERTAIN:
-                    # Check safety valve
                     if al_consecutive_counter >= 3:
                         raise RuntimeError("Max AL retries reached. Infinite loop detected.")
 
-                    # MD Uncertainty -> AL
                     logger.info("MD detected uncertainty. Triggering AL.")
                     dump_file = Path("dump.lammpstrj")
                     if not dump_file.exists():
@@ -267,32 +283,27 @@ class ActiveLearningOrchestrator:
                     last_frame = read(dump_file, index=-1, format="lammps-dump-text")
                     self._ensure_chemical_symbols(last_frame)
 
-                    new_pot = self._trigger_al([last_frame], abs_potential_path, potential_yaml_path, abs_asi_path, work_dir)
+                    new_pot = self._trigger_al([last_frame], abs_potential_path, potential_yaml_path, abs_asi_path, work_dir, iteration)
 
                     if new_pot:
                         current_potential = str(Path(new_pot).resolve())
-                        is_restart = True # Resume MD from checkpoint
+                        is_restart = True
 
-                        # Update ASI
                         new_asi = work_dir / "potential.asi"
                         if new_asi.exists():
                             current_asi = str(new_asi.resolve())
 
-                        # Increment counters
-                        # Note: Loop increments iteration, so we continue to next iteration number but with 'is_restart=True'
                         al_consecutive_counter += 1
                         continue
                     else:
-                        break # AL failed
+                        break
 
                 elif sim_state == SimulationState.FAILED:
                     logger.error("MD Failed.")
                     break
 
-                # MD Success -> Reset AL counter
                 al_consecutive_counter = 0
 
-                # --- 2. KMC Phase ---
                 if self.config.kmc_params.active:
                     logger.info("Starting KMC Phase...")
 
@@ -313,18 +324,14 @@ class ActiveLearningOrchestrator:
 
                     if kmc_result.status == KMCStatus.SUCCESS:
                         logger.info(f"KMC Event Successful. Time step: {kmc_result.time_step:.3e} s")
-
                         MaxwellBoltzmannDistribution(
                             kmc_result.structure,
                             temperature_K=self.config.md_params.temperature
                         )
-
                         next_input_file = work_dir / "kmc_output.data"
                         write(next_input_file, kmc_result.structure, format="lammps-data", velocities=True)
-
                         current_structure = str(next_input_file.resolve())
                         is_restart = False
-                        # Loop continues to next iteration
 
                     elif kmc_result.status == KMCStatus.UNCERTAIN:
                         logger.info("KMC detected uncertainty. Triggering AL.")
@@ -332,16 +339,14 @@ class ActiveLearningOrchestrator:
                         if al_consecutive_counter >= 3:
                             raise RuntimeError("Max AL retries reached in KMC. Infinite loop detected.")
 
-                        new_pot = self._trigger_al([kmc_result.structure], abs_potential_path, potential_yaml_path, abs_asi_path, work_dir)
+                        new_pot = self._trigger_al([kmc_result.structure], abs_potential_path, potential_yaml_path, abs_asi_path, work_dir, iteration)
 
                         if new_pot:
                             current_potential = str(Path(new_pot).resolve())
-
                             new_asi = work_dir / "potential.asi"
                             if new_asi.exists():
                                 current_asi = str(new_asi.resolve())
-
-                            is_restart = True # Resume from where we were
+                            is_restart = True
                             al_consecutive_counter += 1
                             continue
                         else:
@@ -350,7 +355,6 @@ class ActiveLearningOrchestrator:
                     elif kmc_result.status == KMCStatus.NO_EVENT:
                         logger.info("KMC found no event. Continuing MD.")
                         is_restart = True
-                        # Loop continues
 
                 else:
                     if sim_state == SimulationState.COMPLETED:
@@ -364,7 +368,6 @@ class ActiveLearningOrchestrator:
                 os.chdir(original_cwd)
 
     def _resolve_path(self, path_str: str, base_cwd: Path) -> Path:
-        """Resolve a path to absolute, handling relative paths correctly."""
         p = Path(path_str)
         if p.is_absolute():
             return p
@@ -373,14 +376,10 @@ class ActiveLearningOrchestrator:
     def _prepare_structure_path(
         self, is_restart: bool, iteration: int, initial_structure: str, base_cwd: Path
     ) -> Optional[str]:
-        """Determine the correct input structure path."""
-        # Check current_structure from state first (if explicitly set to a .data file by KMC)
         if not is_restart and initial_structure and initial_structure.endswith(".data"):
              return str(self._resolve_path(initial_structure, base_cwd))
 
         if is_restart:
-            # Look in previous iterations for restart.chk
-            # Since iteration is the CURRENT one, we look at iteration-1 for restart file.
             search_start = iteration - 1
             if search_start < 1:
                 pass
@@ -389,19 +388,9 @@ class ActiveLearningOrchestrator:
             restart_file = prev_dir / "restart.chk"
 
             if not restart_file.exists():
-                # Check current dir (if we crashed mid-way and are resuming same iter)
-                # But logic now starts new iter folder.
-                # If we resume, we loaded iteration X from state, and now we are at X+1.
-                # Wait, if we resume:
-                # State says iteration = 10.
-                # Loop starts: iteration = 11.
-                # work_dir = iteration_11.
-                # We need restart.chk from iteration_10.
                 pass
 
             if not restart_file.exists():
-                # Fallback: maybe we are just continuing from a non-MD step or something specific
-                # For now, log error
                  logger.error(f"Restart file missing for resume: {restart_file}")
                  return None
             return str(restart_file)
@@ -409,7 +398,6 @@ class ActiveLearningOrchestrator:
             return str(self._resolve_path(initial_structure, base_cwd))
 
     def _ensure_chemical_symbols(self, atoms: Atoms):
-        """Maps numeric types to chemical symbols if missing."""
         if 'type' in atoms.arrays:
              types = atoms.get_array('type')
              elements = self.config.md_params.elements
