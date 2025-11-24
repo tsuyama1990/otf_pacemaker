@@ -87,11 +87,14 @@ class DFTConfigurator:
                 logger.info("Auto-Physics: Enabled Spin Polarization (nspin=2)")
 
         # 4. Handle Starting Magnetization
-        # NOTE: We do NOT set starting_magnetization(i) here because the species index 'i'
-        # depends on how ASE sorts species when generating the input file.
-        # Instead, we return the 'magnetism_settings' map and let the caller/Labeler
-        # apply it to the Atoms object via set_initial_magnetic_moments().
-        # This ensures ASE generates the correct starting_magnetization tags.
+        # We purposely do NOT set 'starting_magnetization(i)' in input_data here.
+        # ASE's Espresso calculator determines the species order for the input file dynamically.
+        # Attempting to guess the index 'i' based on sorted(elements) here creates a race condition
+        # (Time Bomb) where we might assign magnetic moments to the wrong species if ASE sorts differently.
+        #
+        # Instead, we return 'magnetism_settings' (element -> moment) and rely on the Labeler
+        # to apply these directly to the Atoms object via atoms.set_initial_magnetic_moments().
+        # ASE will then correctly generate the starting_magnetization tags matched to its internal ordering.
 
         # 5. Create Profile and Calculator
         profile = EspressoProfile(
