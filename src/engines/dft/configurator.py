@@ -32,7 +32,7 @@ class DFTConfigurator:
         """
         self.params = params
 
-    def build(self, atoms: Atoms, elements: List[str], kpts: Optional[tuple] = None) -> Espresso:
+    def build(self, atoms: Atoms, elements: List[str], kpts: Optional[tuple] = None) -> tuple[Espresso, Dict[str, float]]:
         """Build a configured Espresso calculator.
 
         Args:
@@ -41,7 +41,7 @@ class DFTConfigurator:
             kpts: K-points tuple (e.g. (3,3,3)).
 
         Returns:
-            Espresso: The configured calculator.
+            Tuple[Espresso, Dict[str, float]]: The configured calculator and the magnetic moments map.
         """
         # 1. Load SSSP and Pseudopotentials (Static Config)
         sssp_db = load_sssp_database(self.params.sssp_json_path)
@@ -87,49 +87,11 @@ class DFTConfigurator:
                 logger.info("Auto-Physics: Enabled Spin Polarization (nspin=2)")
 
         # 4. Handle Starting Magnetization
-        # In ASE Espresso, we can pass 'magmoms' to the Atoms object, or set 'starting_magnetization' in input_data.
-        # However, input_data requires mapping species index (1..ntyp) to values.
-        # ASE handles `initial_magnetic_moments` on the Atoms object automatically if we don't specify it in input_data?
-        # Actually, ASE's Espresso calculator is smart. If we set atoms.set_initial_magnetic_moments(), it writes starting_magnetization.
-        # BUT, since we are returning a calculator that might be attached to different atoms (or re-attached),
-        # it's safer to configure the calculator to handle it or apply it to the atoms.
-        #
-        # Better approach: We return the calculator. The caller attaches it to atoms.
-        # But 'starting_magnetization' depends on species.
-        # If we use `input_data['system']['starting_magnetization']`, we need to know the species order.
-        # ASE's `write_espresso_in` determines species order.
-        #
-        # A robust way is to put the recommended magmoms into the atoms object itself before calculation,
-        # but this method builds the *calculator*.
-        #
-        # Solution: We will pass `magnetism_settings` (dict of {Element: moment}) back to the caller
-        # OR we set it in `input_data` using ASE's convention if possible?
-        # ASE Espresso calculator does NOT automatically map `starting_magnetization` from a dict unless we use specific keys.
-        #
-        # Wait, the prompt says: "magnetic_map を展開し、starting_magnetization(i) を設定".
-        # Since we don't know the species index 'i' until ASE writes the file, this is tricky *inside* the calculator dict
-        # unless we know the species list order ASE will use.
-        # ASE sorts unique species alphabetically usually.
-        #
-        # Let's rely on `atoms.set_initial_magnetic_moments`? No, the Labeler receives `atoms`.
-        # The Configurator builds the Calculator.
-        # If we want the Calculator to carry this info, it's hard.
-        #
-        # Alternative: The prompt says "starting_magnetization(i) を設定".
-        # The `elements` list passed to this method `build` is likely the full list of elements in the system.
-        # If we sort `elements`, we can map them.
-        #
-        # sorted_elements = sorted(list(set(elements)))
-        # for i, el in enumerate(sorted_elements):
-        #     if el in magnetism_settings:
-        #         input_data["system"][f"starting_magnetization({i+1})"] = magnetism_settings[el]
-
-        sorted_elements = sorted(list(set(elements)))
-        for i, el in enumerate(sorted_elements):
-            if el in magnetism_settings:
-                val = magnetism_settings[el]
-                # Only set if non-zero to keep input clean, or set anyway.
-                input_data["system"][f"starting_magnetization({i+1})"] = val
+        # NOTE: We do NOT set starting_magnetization(i) here because the species index 'i'
+        # depends on how ASE sorts species when generating the input file.
+        # Instead, we return the 'magnetism_settings' map and let the caller/Labeler
+        # apply it to the Atoms object via set_initial_magnetic_moments().
+        # This ensures ASE generates the correct starting_magnetization tags.
 
         # 5. Create Profile and Calculator
         profile = EspressoProfile(
@@ -140,7 +102,7 @@ class DFTConfigurator:
         if kpts is None:
              kpts = (3, 3, 3)
 
-        return Espresso(
+        calculator = Espresso(
             profile=profile,
             pseudopotentials=pseudopotentials,
             input_data=input_data,
@@ -148,3 +110,5 @@ class DFTConfigurator:
             koffset=(1, 1, 1),
             pseudo_dir=pseudo_dir_abs
         )
+
+        return calculator, magnetism_settings
