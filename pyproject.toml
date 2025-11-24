@@ -30,6 +30,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
+[project.scripts]
+config_gen = "src.cli.config_gen:main"
+main = "src.main:main"
+
 [dependency-groups]
 dev = [
     "black",

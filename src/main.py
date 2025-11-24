@@ -13,7 +13,7 @@ import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
 
-from src.core.config import Config
+from src.core.config import Config, MetaConfig
 from src.core.factory import ComponentFactory
 from src.workflows.orchestrator import ActiveLearningOrchestrator
 from src.workflows.seed_generation import SeedGenerator
@@ -80,13 +80,13 @@ def parse_arguments():
         "--config",
         type=Path,
         default=Path("config.yaml"),
-        help="Path to the main configuration file (default: config.yaml)"
+        help="Path to the experiment configuration file (default: config.yaml)"
     )
     parser.add_argument(
         "--meta",
         type=Path,
         default=Path("meta_config.yaml"),
-        help="Path to the meta configuration file (default: meta_config.yaml)"
+        help="Path to the environment meta configuration file (default: meta_config.yaml)"
     )
     return parser.parse_args()
 
@@ -108,7 +108,7 @@ def main():
     # 1. Load Configuration
     try:
         # Load Meta first (L0)
-        meta_config = Config.load_meta(meta_path)
+        meta_config = MetaConfig.load_meta(meta_path)
         # Load Experiment/System (L1) and inject Meta
         config = Config.load_experiment(config_path, meta_config)
     except Exception as e:
@@ -120,8 +120,8 @@ def main():
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         # Backup configuration files for reproducibility
-        shutil.copy(config_path, output_dir / "config.yaml.backup")
-        shutil.copy(meta_path, output_dir / "meta_config.yaml.backup")
+        shutil.copy(config_path, output_dir / "config.yaml")
+        shutil.copy(meta_path, output_dir / "meta_config.yaml")
         logger.info(f"Initialized experiment '{config.experiment.name}' at {output_dir}")
         logger.info("Configuration files backed up.")
     except Exception as e:
@@ -146,6 +146,9 @@ def main():
             if not generated_pot.exists():
                 logger.error("Seed generation finished but potential file is missing.")
                 sys.exit(1)
+
+            # Ensure parent exists
+            initial_pot_path.parent.mkdir(parents=True, exist_ok=True)
 
             if generated_pot.resolve() != initial_pot_path.resolve():
                 logger.info(f"Copying generated potential to configured path: {initial_pot_path}")
