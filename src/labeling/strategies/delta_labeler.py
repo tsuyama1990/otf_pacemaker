@@ -14,7 +14,8 @@ class DeltaLabeler(Labeler):
     """Calculates the delta between DFT and reference (LJ) calculations."""
 
     def __init__(self, reference_calculator: Calculator, baseline_calculator: Calculator,
-                 e0_dict: Optional[Dict[str, float]] = None, outlier_energy_max: float = 10.0):
+                 e0_dict: Optional[Dict[str, float]] = None, outlier_energy_max: float = 10.0,
+                 magnetism_settings: Optional[Dict[str, float]] = None):
         """Initialize the DeltaLabeler.
 
         Args:
@@ -22,11 +23,13 @@ class DeltaLabeler(Labeler):
             baseline_calculator: A configured ASE calculator for the baseline (e.g. LJ).
             e0_dict: Dictionary of isolated atomic energies.
             outlier_energy_max: Max energy delta per atom (eV) allowed before discarding.
+            magnetism_settings: Dictionary of initial magnetic moments {Element: moment}.
         """
         self.reference_calculator = reference_calculator
         self.baseline_calculator = baseline_calculator
         self.e0_dict = e0_dict or {}
         self.outlier_energy_max = outlier_energy_max
+        self.magnetism_settings = magnetism_settings
 
     def label(self, structure: Atoms) -> Optional[Atoms]:
         """Compute delta energy, forces, and stress for a given structure.
@@ -44,6 +47,13 @@ class DeltaLabeler(Labeler):
 
         # 1. Reference Calculation (DFT)
         try:
+            # Apply Initial Magnetic Moments if settings exist
+            if self.magnetism_settings:
+                # Default to 0.0 if element not in settings
+                initial_mags = [self.magnetism_settings.get(s, 0.0) for s in cluster_ref.get_chemical_symbols()]
+                cluster_ref.set_initial_magnetic_moments(initial_mags)
+                logger.debug(f"Applied magnetic moments: {initial_mags}")
+
             cluster_ref.calc = self.reference_calculator
             e_ref = cluster_ref.get_potential_energy()
             f_ref = cluster_ref.get_forces()
@@ -86,7 +96,8 @@ class DeltaLabeler(Labeler):
         result_cluster.calc = None
 
         # Convert Stress to Virial (Extensive) [eV]
-        # Virial W = - Sigma * V
+        # Virial W [eV] = - Stress [eV/A^3] * Volume [A^3]
+        # Note: ASE Stress is typically Voigt notation. Pacemaker expects Virial in eV.
         volume = structure.get_volume()
         virial_delta = -1.0 * s_delta * volume
 

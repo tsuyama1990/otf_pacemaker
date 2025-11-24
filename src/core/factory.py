@@ -85,6 +85,7 @@ class ComponentFactory:
         dummy_atoms = Atoms(symbols=elements)
 
         configurator = DFTConfigurator(self.config.dft_params)
+        # Returns (calculator, magnetism_settings)
         return configurator.build(dummy_atoms, elements, kpts)
 
     def _get_e0_dict(self):
@@ -151,8 +152,8 @@ class ComponentFactory:
 
     def create_labeler(self) -> Labeler:
         """Creates the Labeler (Delta-Learning: DFT - LJ)."""
-        # 1. Setup DFT (Espresso)
-        qe_calculator = self._create_dft_calculator()
+        # 1. Setup DFT (Espresso) - Now returns tuple
+        qe_calculator, magnetism_settings = self._create_dft_calculator()
 
         # 2. Setup Baseline (LJ)
         lj_kwargs = {
@@ -170,7 +171,8 @@ class ComponentFactory:
             reference_calculator=qe_calculator,
             baseline_calculator=lj_calculator,
             e0_dict=e0_dict,
-            outlier_energy_max=self.config.al_params.outlier_energy_max
+            outlier_energy_max=self.config.al_params.outlier_energy_max,
+            magnetism_settings=magnetism_settings
         )
 
     def create_trainer(self) -> Trainer:
