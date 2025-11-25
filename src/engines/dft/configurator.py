@@ -89,7 +89,13 @@ class DFTConfigurator:
                 magnetism_settings = mag_rec.get("moments", {})
                 logger.info("Auto-Physics: Enabled Spin Polarization (nspin=2)")
 
-        # 4. Handle Starting Magnetization
+        # 4. Handle System Charge
+        if 'charge' in atoms.info:
+            charge = atoms.info['charge']
+            input_data["system"]["tot_charge"] = charge
+            logger.info(f"System charge {charge} propagated to QE tot_charge.")
+
+        # 5. Handle Starting Magnetization
         # We purposely do NOT set 'starting_magnetization(i)' in input_data here.
         # ASE's Espresso calculator determines the species order for the input file dynamically.
         # Attempting to guess the index 'i' based on sorted(elements) here creates a race condition

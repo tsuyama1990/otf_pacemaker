@@ -30,7 +30,8 @@ class SmallCellGenerator(StructureGenerator):
         box_size: float,
         stoichiometric_ratio: Dict[str, float],
         lammps_cmd: str = "lmp_serial",
-        min_bond_distance: float = 1.5,
+        min_bond_distance: float = 1.5, # Kept for fallback
+        bond_thresholds: Optional[Dict[str, float]] = None,
         stoichiometry_tolerance: float = 0.1,
         lj_params: Optional[Dict[str, float]] = None,
         elements: Optional[List[str]] = None
@@ -42,7 +43,8 @@ class SmallCellGenerator(StructureGenerator):
             box_size: Size of the cubic small cell (Angstroms).
             stoichiometric_ratio: Expected stoichiometry.
             lammps_cmd: Command to run LAMMPS.
-            min_bond_distance: Minimum bond distance for overlap removal.
+            min_bond_distance: Default minimum bond distance.
+            bond_thresholds: Element-pair specific bond distance cutoffs.
             stoichiometry_tolerance: Tolerance for stoichiometry check.
             lj_params: Optional LJ params for PreOptimizer (if needed).
             elements: Optional list of elements for PreOptimizer (if needed).
@@ -51,7 +53,8 @@ class SmallCellGenerator(StructureGenerator):
         self.box_size = box_size
         self.stoichiometric_ratio = stoichiometric_ratio
         self.lammps_cmd = lammps_cmd
-        self.min_bond_distance = min_bond_distance
+        self.min_bond_distance = min_bond_distance # Fallback
+        self.bond_thresholds = bond_thresholds or {}
         self.stoichiometry_tolerance = stoichiometry_tolerance
 
         # Initialize PreOptimizer if params provided (optional enhancement)
@@ -103,35 +106,54 @@ class SmallCellGenerator(StructureGenerator):
 
         return relaxed_atoms
 
+    def _get_bond_cutoff(self, s1: str, s2: str) -> float:
+        """Get bond cutoff for a specific element pair."""
+        # Check for specific pair in both orders
+        key1 = f"{s1}-{s2}"
+        key2 = f"{s2}-{s1}"
+        if key1 in self.bond_thresholds:
+            return self.bond_thresholds[key1]
+        if key2 in self.bond_thresholds:
+            return self.bond_thresholds[key2]
+        # Check for wildcard
+        if f"{s1}-*" in self.bond_thresholds:
+            return self.bond_thresholds[f"{s1}-*"]
+        if f"*-{s2}" in self.bond_thresholds:
+            return self.bond_thresholds[f"*-{s2}"]
+        # Fallback to default
+        return self.bond_thresholds.get("default", self.min_bond_distance)
+
     def _remove_overlaps(self, atoms: Atoms, center_pos: np.ndarray):
-        """Remove overlapping atoms based on min_bond_distance."""
+        """Remove overlapping atoms based on element-pair specific distances."""
         while True:
             dists = atoms.get_all_distances(mic=True)
             np.fill_diagonal(dists, np.inf)
 
-            overlap_indices = np.argwhere(np.triu(dists < self.min_bond_distance))
-
-            if len(overlap_indices) == 0:
-                break
-
+            symbols = atoms.get_chemical_symbols()
             to_delete = set()
-            for i, j in overlap_indices:
-                if i in to_delete or j in to_delete:
-                    continue
 
-                pos_i = atoms.positions[i]
-                pos_j = atoms.positions[j]
+            # Find all pairs that are too close
+            for i in range(len(atoms)):
+                for j in range(i + 1, len(atoms)):
+                    s1 = symbols[i]
+                    s2 = symbols[j]
+                    cutoff = self._get_bond_cutoff(s1, s2)
 
-                dist_i = np.linalg.norm(pos_i - center_pos)
-                dist_j = np.linalg.norm(pos_j - center_pos)
+                    if dists[i, j] < cutoff:
+                        # Mark one for deletion
+                        if i in to_delete or j in to_delete:
+                            continue
 
-                if dist_i > dist_j:
-                    to_delete.add(i)
-                else:
-                    to_delete.add(j)
+                        dist_i = np.linalg.norm(atoms.positions[i] - center_pos)
+                        dist_j = np.linalg.norm(atoms.positions[j] - center_pos)
+
+                        if dist_i > dist_j:
+                            to_delete.add(i)
+                        else:
+                            to_delete.add(j)
 
             if not to_delete:
-                 break
+                break
 
             del atoms[sorted(list(to_delete), reverse=True)]
             logger.info(f"Removed {len(to_delete)} overlapping atoms.")
