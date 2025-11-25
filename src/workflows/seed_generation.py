@@ -35,6 +35,7 @@ from src.utils.sssp_loader import (
     validate_pseudopotentials
 )
 from src.utils.atomic_energies import AtomicEnergyManager
+from src.engines.dft.heuristics import PymatgenHeuristics
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -59,11 +60,11 @@ class SeedGenerator:
         manager = AtomicEnergyManager(storage_path)
 
         # Prepare DFT factory for single atoms
-        def dft_factory():
+        sssp_db = load_sssp_database(self.config.dft_params.sssp_json_path)
+
+        def dft_factory(element: str):
              # Re-use DFT logic but for Gamma point
-             # Load SSSP
-             sssp_db = load_sssp_database(self.config.dft_params.sssp_json_path)
-             elements = self.config.md_params.elements
+             elements = [element] # Single element for this calc
              pseudo_dir_abs = str(Path(self.config.dft_params.pseudo_dir).resolve())
              pseudopotentials = get_pseudopotentials_dict(elements, sssp_db)
              ecutwfc, ecutrho = calculate_cutoffs(elements, sssp_db)
@@ -89,7 +90,17 @@ class SeedGenerator:
                 "electrons": {
                     "mixing_beta": 0.7,
                 }
-            }
+             }
+
+             # Check for magnetism
+             atom_for_check = Atoms(element)
+             heuristics = PymatgenHeuristics.get_recommended_params(atom_for_check)
+             if heuristics["magnetism"]["nspin"] == 2:
+                logger.info(f"Element {element} is magnetic. Enabling spin polarization for E0.")
+                qe_input_data["system"]["nspin"] = 2
+                moment = heuristics["magnetism"]["moments"].get(element, 0.0)
+                qe_input_data["system"]["starting_magnetization"] = {element: moment}
+
 
              return Espresso(
                 profile=profile,

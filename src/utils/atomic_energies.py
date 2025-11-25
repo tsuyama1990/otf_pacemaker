@@ -13,10 +13,10 @@ class AtomicEnergyManager:
     def __init__(self, storage_path: Path):
         self.storage_path = storage_path
 
-    def get_e0(self, elements: List[str], calculator_factory: Callable[[], Calculator]) -> Dict[str, float]:
+    def get_e0(self, elements: List[str], calculator_factory: Callable[[str], Calculator]) -> Dict[str, float]:
         """
         Loads E0 from file or calculates them if missing.
-        calculator_factory: Function that returns a new Calculator instance.
+        calculator_factory: Function that accepts an element symbol and returns a new Calculator instance.
         """
         if self.storage_path.exists():
             logger.info(f"Loading E0 from {self.storage_path}")
@@ -30,7 +30,7 @@ class AtomicEnergyManager:
             atom = Atoms(el, cell=[15.0, 15.0, 15.0], pbc=True)
             atom.center()
 
-            calc = calculator_factory()
+            calc = calculator_factory(el)
             atom.calc = calc
 
             try:
