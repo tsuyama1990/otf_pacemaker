@@ -85,6 +85,7 @@ class MDParams:
     masses: dict[str, float]
     restart_freq: int = 1000
     dump_freq: int = 1000
+    n_md_walkers: int = 1
     # lammps_command removed, now in MetaConfig
 
 
@@ -105,6 +106,7 @@ class ALParams:
     query_strategy: str = "uncertainty"
     sampling_strategy: str = "composite"
     outlier_energy_max: float = 10.0
+    gamma_upper_bound: float = 2.0
 
 
 @dataclass
@@ -182,6 +184,15 @@ class TrainingParams:
 
 
 @dataclass
+class ExplorationStage:
+    """Parameters for a single thermodynamic exploration stage."""
+    iter_start: int
+    iter_end: int
+    temp: List[float]
+    press: List[float]
+
+
+@dataclass
 class Config:
     """Main configuration class aggregating all parameter sections."""
     meta: MetaConfig
@@ -195,6 +206,7 @@ class Config:
     seed: int = 42
     kmc_params: KMCParams = field(default_factory=KMCParams)
     generation_params: GenerationParams = field(default_factory=GenerationParams)
+    exploration_schedule: List[ExplorationStage] = field(default_factory=list)
 
     @classmethod
     def load_meta(cls, path: Path) -> MetaConfig:
@@ -267,6 +279,11 @@ class Config:
 
         ace_dict = config_dict.get("ace_model", {})
 
+        # Parse exploration schedule
+        schedule_list = []
+        for stage in config_dict.get("exploration_schedule", []):
+            schedule_list.append(ExplorationStage(**stage))
+
         return cls(
             meta=meta_config,
             experiment=ExperimentConfig(
@@ -281,5 +298,6 @@ class Config:
             training_params=TrainingParams(**config_dict.get("training_params", {})),
             ace_model=ACEModelParams(**ace_dict),
             generation_params=generation_params,
+            exploration_schedule=schedule_list,
             seed=config_dict.get("seed", 42)
         )

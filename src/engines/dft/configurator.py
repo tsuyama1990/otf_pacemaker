@@ -124,3 +124,23 @@ class DFTConfigurator:
         )
 
         return calculator, magnetism_settings
+
+    def get_fallback_calculator(self, atoms: Atoms, elements: List[str], kpts: Optional[tuple] = None) -> Espresso:
+        """Create a calculator with fallback (robust) settings."""
+        calc, _ = self.build(atoms, elements, kpts)
+
+        # Modify input_data for robustness
+        # Increase smearing
+        calc.input_data["system"]["degauss"] = 0.05
+        if "occupations" not in calc.input_data["system"]:
+            calc.input_data["system"]["occupations"] = "smearing"
+            calc.input_data["system"]["smearing"] = "mv" # Marzari-Vanderbilt
+
+        # Reduce mixing beta
+        calc.input_data["electrons"]["mixing_beta"] = 0.3
+
+        # Increase max electron steps
+        calc.input_data["electrons"]["electron_maxstep"] = 200
+
+        logger.info("Using fallback DFT settings (degauss=0.05, beta=0.3, maxstep=200).")
+        return calc
